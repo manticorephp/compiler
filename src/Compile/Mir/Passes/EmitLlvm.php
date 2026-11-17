@@ -277,6 +277,12 @@ final class EmitLlvm implements EmitVisitor
     private array $dynamicMethodHelpers = [];
     /** @var array<string, int[]>|null lower-cased method name → ids of the classes the method_exists table lists it for */
     private ?array $methodClassIds = null;
+    /** Dispatch-table data and inline-cache slots ({@see icSlot}), written once after every body. */
+    private string $dispatchDataIr = '';
+    /** @var array<string, int> function symbol => inline-cache slots handed out in it */
+    private array $icOrdinals = [];
+    /** The magic-only helper's symbol once its table is built, else ''. */
+    private string $magicOnlySym = '';
     /** Prevent recursive uniform-ABI selection while emitting an extracted fallback. */
     private bool $dynamicMethodAbiDisabled = false;
 
@@ -789,6 +795,9 @@ final class EmitLlvm implements EmitVisitor
         $this->propDenyRows = [];
         $this->dynamicMethodHelpers = [];
         $this->methodClassIds = null;
+        $this->dispatchDataIr = '';
+        $this->icOrdinals = [];
+        $this->magicOnlySym = '';
         $this->raiseRejected = [];
         $this->dynamicMethodAbiDisabled = false;
         $this->reflectNames = $module->reflectNames;
@@ -1385,6 +1394,8 @@ final class EmitLlvm implements EmitVisitor
         $extraBodies = '';
         $this->litTablesFlushed = true;
         if ($this->needsInclResolveFn) { $extraParts[] = $this->emitInclResolveFn(); }
+        $extraParts[] = $this->dispatchDataIr;
+        $this->dispatchDataIr = '';
         // Erased fixed-property readers are generated lazily while ordinary
         // functions emit. Append each helper exactly once after the function
         // loop; callers then contain only a small call instead of a repeated

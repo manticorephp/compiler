@@ -10761,80 +10761,216 @@ trait EmitLlvmObjects
      * other receiver takes the ordinary dispatch.
      */
     /**
-     * `i64 (i64 cell)`: 1 when the value is an object whose class has `__call` and lacks
-     * `$method`, else 0 — {@see emitMixedMagicCall}'s run-time choice, one body per name.
+     * `call i64 (i64 cell)`-shaped verdict for {@see emitMixedMagicCall}: 1 when the value is an object
+     * whose class has `__call` and lacks `$method`, else 0. One module routine for every name — the
+     * per-class answer is the MAGIC_ONLY table, built once from the method_exists index — fronted by
+     * a per-site verdict cache, so a site that keeps seeing one class pays one compare. A name no
+     * class answers only through `__call` is a constant 0; one that up to four do keeps a small pure
+     * per-name test ({@see magicOnlySmallHelper}).
+     * Returns the IR of the call; the result is in lastValue.
      */
-    private function magicOnlyPredicate(string $method): string
+    private function magicOnlyVerdict(string $cellV, string $method): string
     {
-        $key = '__mir_magiconly|' . \strtolower($method);
-        $sym = '@' . $this->mirHelperSym($this->keyedHelperName('__mir_magiconly_', \strtolower($method)));
+        $lm = \strtolower($method);
+        $ids = $this->magicOnlyClassIds($lm);
+        if ($ids === []) {
+            $this->lastValue = '0';
+            $this->lastValueType = 'i64';
+            return '';
+        }
+        $r = $this->ssa->allocReg();
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        if (\count($ids) <= 4) {
+            return '  ' . $r . ' = call i64 ' . $this->magicOnlySmallHelper($lm, $ids) . '(i64 ' . $cellV . ")\n";
+        }
+        $sym = $this->magicOnlyHelper();
+        $ic = $this->icSlot('{ i64, i64, ptr, i64 }', '{ i64 0, i64 0, ptr ' . $this->litStr($lm)
+            . ', i64 ' . (string)$this->fnvHash64($lm) . ' }');
+        return '  ' . $r . ' = call i64 ' . $sym . '(i64 ' . $cellV . ', ptr ' . $ic . ")\n";
+    }
+
+    /**
+     * A fresh inline cache for the call site being emitted: a mutable global of `$type`, starting
+     * as `$init` (its cache words zero, any constant key the site carries filled in).
+     *
+     * Named by the enclosing function's symbol and the site's ordinal in it — a function of the
+     * body text alone, so a prelude body emits the same name in every program and a coalesced
+     * `linkonce_odr` body shares one slot. `weak`: never dropped from a split part that holds it
+     * but not its user, and two objects defining one name (a prelude body in the app and in the
+     * stdlib) fold to one.
+     */
+    private function icSlot(string $type, string $init): string
+    {
+        $base = $this->cellSinkFnOverride ?? $this->frame->name;
+        $n = $this->icOrdinals[$base] ?? 0;
+        $this->icOrdinals[$base] = $n + 1;
+        $sym = '@__mc_ic.' . \str_replace('-', 'n', (string)$this->fnvHash64($base)) . '.' . (string)$n;
+        $this->dispatchDataIr .= $sym . ' = weak hidden global ' . $type . ' ' . $init . ", align 8\n";
+        return $sym;
+    }
+
+    /**
+     * `i64 @<sym>(i64 cell, ptr ic)` and the MAGIC_ONLY table it reads,
+     * built on first use.
+     */
+    private function magicOnlyHelper(): string
+    {
+        if ($this->magicOnlySym !== '') { return $this->magicOnlySym; }
+        $sym = '@' . $this->mirHelperSym('__mir_magic_only');
+        $this->magicOnlySym = $sym;
+        $this->rt->needsTagged = true;
+        $this->rt->needsStrcmp = true;
+        $this->ensureMethodClassIds();
+        /** @var array<int, bool> $callIds */
+        $callIds = [];
+        foreach ($this->methodClassIds['__call'] ?? [] as $id) { $callIds[(int)$id] = true; }
+        /** @var array<int, array<string, int>> $byClass class id => lower-cased name => its hash */
+        $byClass = [];
+        foreach ($this->methodClassIds ?? [] as $lname => $ids) {
+            foreach ($ids as $id) {
+                if (!isset($callIds[(int)$id])) { continue; }
+                $byClass[(int)$id][(string)$lname] = $this->fnvHash64((string)$lname);
+            }
+        }
+        \ksort($byClass, SORT_NUMERIC);
+        $rowsSym = '@' . $this->mirHelperSym('__mc_magic_only_rows');
+        $rows = [];
+        foreach ($byClass as $cid => $names) {
+            \asort($names, SORT_NUMERIC);
+            $cells = [];
+            foreach ($names as $nm => $h) { $cells[] = '{ i64, ptr } { i64 ' . (string)$h . ', ptr ' . $this->litStr((string)$nm) . ' }'; }
+            $nsym = $rowsSym . '.' . (string)$cid;
+            $this->dispatchDataIr .= $nsym . ' = weak_odr hidden unnamed_addr constant [' . (string)\count($cells)
+                . ' x { i64, ptr }] [' . \implode(', ', $cells) . "]\n";
+            $rows[] = '{ i64, i64, ptr } { i64 ' . (string)$cid . ', i64 ' . (string)\count($cells) . ', ptr ' . $nsym . ' }';
+        }
+        $n = \count($rows);
+        $this->dispatchDataIr .= $rowsSym . ' = weak_odr hidden unnamed_addr constant [' . (string)$n
+            . ' x { i64, i64, ptr }] [' . \implode(', ', $rows) . "]\n";
+        $this->dispatchDataIr .= \Compile\Mir\RuntimeLibrary::magicOnlyFindFn();
+        $vbit = (string)\Compile\MemoryAbi::IC_VERDICT_BIT;
+        $keep = '-' . (string)((int)$vbit + 1);
+        $tail = "  %w = load i64, ptr %ic\n"
+            . '  %wd = and i64 %w, ' . $keep . "\n"
+            . "  %hit = icmp eq i64 %wd, %desc\n"
+            . "  br i1 %hit, label %cached, label %probe1\n"
+            . "cached:\n"
+            . '  %wv = and i64 %w, ' . $vbit . "\n"
+            . "  ret i64 %wv\n"
+            . "probe1:\n"
+            . "  %ic1 = getelementptr inbounds i64, ptr %ic, i64 1\n"
+            . "  %w1 = load i64, ptr %ic1\n"
+            . '  %wd1 = and i64 %w1, ' . $keep . "\n"
+            . "  %hit1 = icmp eq i64 %wd1, %desc\n"
+            . "  br i1 %hit1, label %cached1, label %miss\n"
+            . "cached1:\n"
+            . '  %wv1 = and i64 %w1, ' . $vbit . "\n"
+            . "  ret i64 %wv1\n"
+            . "miss:\n"
+            . "  %dp = inttoptr i64 %desc to ptr\n"
+            . '  %cidp = getelementptr inbounds i8, ptr %dp, i64 ' . (string)\Compile\MemoryAbi::DESCRIPTOR_CLASS_ID_OFFSET . "\n"
+            . "  %cid = load i64, ptr %cidp\n"
+            . '  %res = tail call i64 @__mc_magic_only_find(i64 %cid, ptr ' . $rowsSym . ', i64 ' . (string)$n . ", ptr %ic, i64 %desc)\n"
+            . "  ret i64 %res\n";
+        $this->dynamicMethodHelpers['__mir_magic_only'] = $this->magicOnlyBody($sym, ', ptr %ic', $tail);
+        return $sym;
+    }
+
+    /**
+     * A magic-only verdict function: `i64 @<sym>(i64 cell<params>)`. Classifies the cell — an object
+     * cell or a raw object pointer — by arithmetic on the word alone, so an inlined copy stays
+     * loop-invariant; only a REF cell loads, and its target is classified once more. Then loads the
+     * object's descriptor into `%desc` and runs `$objTail`, which must `ret`. Anything that is not an
+     * object answers 0.
+     */
+    private function magicOnlyBody(string $sym, string $params, string $objTail): string
+    {
+        $this->rt->needsTagged = true;
+        $cls = function (string $v, string $s, string $refTarget): string {
+            $out = '  %isbox' . $s . ' = icmp ugt i64 ' . $v . ", -4503599627370496\n"
+                . '  br i1 %isbox' . $s . ', label %box' . $s . ', label %raw' . $s . "\n"
+                . 'box' . $s . ":\n"
+                . '  %sh' . $s . ' = lshr i64 ' . $v . ", 48\n"
+                . '  %nib' . $s . ' = and i64 %sh' . $s . ", 15\n"
+                . '  %isobj' . $s . ' = icmp eq i64 %nib' . $s . ', ' . (string)\Compile\MemoryAbi::CELL_TAG_OBJ . "\n"
+                . '  %pay' . $s . ' = and i64 ' . $v . ', ' . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n"
+                . '  br i1 %isobj' . $s . ', label %obj, label %' . ($refTarget === '' ? 'no' : 'notobj' . $s) . "\n";
+            if ($refTarget !== '') {
+                $out .= 'notobj' . $s . ":\n"
+                    . '  %isref' . $s . ' = icmp eq i64 %nib' . $s . ', ' . (string)\Compile\MemoryAbi::CELL_TAG_REF . "\n"
+                    . '  br i1 %isref' . $s . ', label %' . $refTarget . ", label %no\n";
+            }
+            return $out . 'raw' . $s . ":\n"
+                . '  %lo' . $s . ' = icmp ugt i64 ' . $v . ", 65535\n"
+                . '  %hi' . $s . ' = icmp ult i64 ' . $v . ", 281474976710656\n"
+                . '  %pl' . $s . ' = and i1 %lo' . $s . ', %hi' . $s . "\n"
+                . '  br i1 %pl' . $s . ', label %rawchk' . $s . ", label %no\n"
+                . 'rawchk' . $s . ":\n"
+                . '  %rp' . $s . ' = inttoptr i64 ' . $v . " to ptr\n"
+                . '  %tp' . $s . ' = getelementptr inbounds i8, ptr %rp' . $s . ", i64 -8\n"
+                . '  %tw' . $s . ' = load i64, ptr %tp' . $s . "\n"
+                . '  %isro' . $s . ' = icmp eq i64 %tw' . $s . ', ' . (string)\Compile\MemoryAbi::RC_TAG_MAGIC . "\n"
+                . '  %isre' . $s . ' = icmp eq i64 %tw' . $s . ', ' . (string)\Compile\MemoryAbi::ENUM_TAG_MAGIC . "\n"
+                . '  %israw' . $s . ' = or i1 %isro' . $s . ', %isre' . $s . "\n"
+                . '  br i1 %israw' . $s . ", label %obj, label %no\n";
+        };
+        return 'define hidden i64 ' . $sym . '(i64 %v' . $params . ") {\nentry:\n"
+            . $cls('%v', '', 'ref')
+            . "ref:\n"
+            . "  %tgtp = inttoptr i64 %pay to ptr\n"
+            . "  %tgt = load i64, ptr %tgtp\n"
+            . $cls('%tgt', '.r', '')
+            . "obj:\n"
+            . "  %p = phi i64 [ %pay, %box ], [ %v, %rawchk ], [ %pay.r, %box.r ], [ %tgt, %rawchk.r ]\n"
+            . "  %pp = inttoptr i64 %p to ptr\n"
+            . '  %dpp = getelementptr inbounds i8, ptr %pp, i64 ' . (string)\Compile\MemoryAbi::OBJECT_DESCRIPTOR_OFFSET . "\n"
+            . "  %desc = load i64, ptr %dpp\n"
+            . $objTail
+            . "no:\n"
+            . "  ret i64 0\n}\n\n";
+    }
+
+    /**
+     * The classes that answer `$lm` only through `__call`: they have `__call` and lack the method.
+     * @return int[]
+     */
+    private function magicOnlyClassIds(string $lm): array
+    {
+        $this->ensureMethodClassIds();
+        /** @var array<int, bool> $has */
+        $has = [];
+        foreach ($this->methodClassIds[$lm] ?? [] as $id) { $has[(int)$id] = true; }
+        $out = [];
+        foreach ($this->methodClassIds['__call'] ?? [] as $id) {
+            if (!isset($has[(int)$id])) { $out[] = (int)$id; }
+        }
+        return $out;
+    }
+
+    /**
+     * For a name only a few classes answer through `__call`: a pure per-name test of the class id
+     * against that set. For up to four classes this costs less code than a call
+     * plus a cache global, and it stays loop-invariant, so the optimizer can hoist it — a cache it
+     * writes could not be.
+     * @param int[] $ids
+     */
+    private function magicOnlySmallHelper(string $lm, array $ids): string
+    {
+        $key = '__mir_magic_only_s|' . $lm;
+        $sym = '@' . $this->mirHelperSym($this->keyedHelperName('__mir_magic_only_s_', $lm));
         if (isset($this->dynamicMethodHelpers[$key])) { return $sym; }
-        $this->dynamicMethodHelpers[$key] = '';
-        $oldSsa = $this->ssa;
-        $oldLocals = $this->locals;
-        $oldCf = $this->cf;
-        $oldArena = $this->arena;
-        $oldLast = $this->lastValue;
-        $oldLastType = $this->lastValueType;
-        $oldCellProv = $this->cellProv;
-        $oldCellSinkOrd = $this->cellSinkOrd;
-        $oldCellSinkFn = $this->cellSinkFnOverride;
-        $oldNeedsBacktrace = $this->rt->needsBacktrace;
-        $oldClassId = $this->classIdReg;
-        $oldSpread = $this->spreadTail;
-        $oldPad = $this->lastPadArgs;
-        $oldVdResult = $this->vdResult;
-        $oldVdArm = $this->vdArmList;
-        $oldVdArgc = $this->vdSiteArgc;
-        $this->ssa = new SsaBuilder();
-        $this->ssa->reset();
-        $this->resetCellGuardFrame();
-        $this->cellSinkFnOverride = \ltrim($sym, '@');
-        $this->locals = new \Compile\Mir\LocalSlots();
-        $this->cf = new \Compile\Mir\ControlFlow();
-        $this->arena = new \Compile\Mir\ArenaContext();
-        $slot = $this->ssa->allocReg();
-        $this->locals->slots['__mc_mo'] = $slot;
-        $body = 'define hidden i64 ' . $sym . "(i64 %v) {\nentry:\n";
-        $body .= '  ' . $slot . " = alloca i64\n  store i64 %v, ptr " . $slot . "\n";
-        $cell = Type::cell();
-        $bool = Type::bool_();
-        $str = fn (string $s): Node => new \Compile\Mir\StringConst($s, Type::string_());
-        $t = fn (): Node => new \Compile\Mir\LoadLocal('__mc_mo', $cell);
-        $call = fn (string $f, array $args): Node => new \Compile\Mir\Call($f, $args, $bool);
-        $false = fn (): Node => new \Compile\Mir\BoolConst(false, $bool);
-        $true = fn (): Node => new \Compile\Mir\BoolConst(true, $bool);
-        $magicOnly = new \Compile\Mir\Ternary($call('is_object', [$t()]),
-            new \Compile\Mir\Ternary($call('method_exists', [$t(), $str('__call')]),
-                // The body is shared by every spelling of the name (keyed lowercase): bake the lowercase
-                // one, or the first requester's spelling would decide the bytes. method_exists ignores case.
-                new \Compile\Mir\Ternary($call('method_exists', [$t(), $str(\strtolower($method))]), $false(), $true(), $bool),
-                $false(), $bool),
-            $false(), $bool);
-        $body .= $this->emitNode($magicOnly);
-        $body .= $this->coerceToI64();
-        $nz = $this->ssa->allocReg();
-        $body .= '  ' . $nz . ' = icmp ne i64 ' . $this->lastValue . ", 0\n";
-        $w = $this->ssa->allocReg();
-        $body .= '  ' . $w . ' = zext i1 ' . $nz . " to i64\n";
-        $body .= '  ret i64 ' . $w . "\n}\n\n";
-        $this->dynamicMethodHelpers[$key] = $body;
-        $this->ssa = $oldSsa;
-        $this->locals = $oldLocals;
-        $this->cf = $oldCf;
-        $this->arena = $oldArena;
-        $this->lastValue = $oldLast;
-        $this->lastValueType = $oldLastType;
-        $this->cellProv = $oldCellProv;
-        $this->cellSinkOrd = $oldCellSinkOrd;
-        $this->cellSinkFnOverride = $oldCellSinkFn;
-        $this->rt->needsBacktrace = $oldNeedsBacktrace;
-        $this->classIdReg = $oldClassId;
-        $this->spreadTail = $oldSpread;
-        $this->lastPadArgs = $oldPad;
-        $this->vdResult = $oldVdResult;
-        $this->vdArmList = $oldVdArm;
-        $this->vdSiteArgc = $oldVdArgc;
+        $tail = "  %dp = inttoptr i64 %desc to ptr\n"
+            . '  %cidp = getelementptr inbounds i8, ptr %dp, i64 ' . (string)\Compile\MemoryAbi::DESCRIPTOR_CLASS_ID_OFFSET . "\n"
+            . "  %cid = load i64, ptr %cidp\n";
+        $acc = 'false';
+        foreach ($ids as $i => $id) {
+            $tail .= '  %e' . (string)$i . ' = icmp eq i64 %cid, ' . (string)$id . "\n";
+            $tail .= '  %o' . (string)$i . ' = or i1 ' . $acc . ', %e' . (string)$i . "\n";
+            $acc = '%o' . (string)$i;
+        }
+        $tail .= '  %z = zext i1 ' . $acc . " to i64\n  ret i64 %z\n";
+        $this->dynamicMethodHelpers[$key] = $this->magicOnlyBody($sym, '', $tail);
         return $sym;
     }
 
@@ -10960,18 +11096,12 @@ trait EmitLlvmObjects
         $out .= '  store i64 ' . $cellV . ', ptr ' . $cellSlot . "\n";
         $this->locals->slots[$cellName] = $cellSlot;
         $cell = Type::cell();
-        $bool = Type::bool_();
         $str = fn (string $s): Node => new \Compile\Mir\StringConst($s, Type::string_());
         $t = fn (): Node => new \Compile\Mir\LoadLocal($cellName, $cell);
-        $call = fn (string $f, array $args): Node => new \Compile\Mir\Call($f, $args, $bool);
-        $false = fn (): Node => new \Compile\Mir\BoolConst(false, $bool);
-        $true = fn (): Node => new \Compile\Mir\BoolConst(true, $bool);
-        // is_object && method_exists(__call) && !method_exists(method), once per method name: spliced into
-        // every site it was ~140 IR lines (a get_class chain per method_exists), 3 MB in one Symfony
-        // Configuration builder whose fluent calls all ride an erased receiver.
-        $pred = $this->magicOnlyPredicate($mc->method);
-        $pr = $this->ssa->allocReg();
-        $out .= '  ' . $pr . ' = call i64 ' . $pred . '(i64 ' . $cellV . ")\n";
+        // is_object && method_exists(__call) && !method_exists(method): one module routine over the
+        // MAGIC_ONLY table behind a per-site verdict cache, not a body per method name.
+        $out .= $this->magicOnlyVerdict($cellV, $mc->method);
+        $pr = $this->lastValue;
         $predName = '__emxp' . $tag;
         $predSlot = $this->ssa->allocReg();
         $out .= '  ' . $predSlot . " = alloca i64\n  store i64 " . $pr . ', ptr ' . $predSlot . "\n";

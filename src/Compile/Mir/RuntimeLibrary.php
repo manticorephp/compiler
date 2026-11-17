@@ -927,6 +927,103 @@ final class RuntimeLibrary
         return $out;
     }
 
+    /**
+     * `i64 @__mc_magic_only_find(i64 cid, ptr rows, i64 n, ptr ic, i64 desc)` — 1 when class `cid`
+     * has `__call` and no method named by the site cache `ic`, else 0, read off a MAGIC_ONLY table
+     * ({@see \Compile\MemoryAbi::MAGIC_ONLY_ROW_SIZE}): a binary search over the class rows, a
+     * lower bound over the name hashes, and a `strcmp` per equal hash; the verdict is pushed into the
+     * site's two-word cache as `desc | verdict`. Text independent of any
+     * module, so every copy is the same `weak_odr` body.
+     */
+    public static function magicOnlyFindFn(): string
+    {
+        $rs = (string)\Compile\MemoryAbi::MAGIC_ONLY_ROW_SIZE;
+        $nn = (string)\Compile\MemoryAbi::MAGIC_ONLY_ROW_NNAMES_OFFSET;
+        $nt = (string)\Compile\MemoryAbi::MAGIC_ONLY_ROW_NAMES_OFFSET;
+        $cs = (string)\Compile\MemoryAbi::MAGIC_ONLY_ROW_CID_OFFSET;
+        $ns = (string)\Compile\MemoryAbi::MAGIC_ONLY_NAME_SIZE;
+        $nh = (string)\Compile\MemoryAbi::MAGIC_ONLY_NAME_HASH_OFFSET;
+        $np = (string)\Compile\MemoryAbi::MAGIC_ONLY_NAME_PTR_OFFSET;
+        return "define weak_odr hidden i64 @__mc_magic_only_find(i64 %cid, ptr %rows, i64 %n, ptr %ic, i64 %desc) noinline {\n"
+            . "entry:\n"
+            . '  %namep = getelementptr inbounds i8, ptr %ic, i64 ' . (string)\Compile\MemoryAbi::VERDICT_IC_NAME_OFFSET . "\n"
+            . "  %name = load ptr, ptr %namep\n"
+            . '  %hashp = getelementptr inbounds i8, ptr %ic, i64 ' . (string)\Compile\MemoryAbi::VERDICT_IC_HASH_OFFSET . "\n"
+            . "  %hash = load i64, ptr %hashp\n"
+            . "  br label %cl\n"
+            . "cl:\n"
+            . "  %lo = phi i64 [ 0, %entry ], [ %lo2, %cnext ]\n"
+            . "  %hi = phi i64 [ %n, %entry ], [ %hi2, %cnext ]\n"
+            . "  %more = icmp slt i64 %lo, %hi\n"
+            . "  br i1 %more, label %cchk, label %nocall\n"
+            . "cchk:\n"
+            . "  %s = add i64 %lo, %hi\n"
+            . "  %mid = lshr i64 %s, 1\n"
+            . '  %off = mul i64 %mid, ' . $rs . "\n"
+            . "  %row = getelementptr inbounds i8, ptr %rows, i64 %off\n"
+            . '  %rcp = getelementptr inbounds i8, ptr %row, i64 ' . $cs . "\n"
+            . "  %rc = load i64, ptr %rcp\n"
+            . "  %eq = icmp eq i64 %rc, %cid\n"
+            . "  br i1 %eq, label %found, label %cnext\n"
+            . "cnext:\n"
+            . "  %lt = icmp slt i64 %cid, %rc\n"
+            . "  %mid1 = add i64 %mid, 1\n"
+            . "  %lo2 = select i1 %lt, i64 %lo, i64 %mid1\n"
+            . "  %hi2 = select i1 %lt, i64 %mid, i64 %hi\n"
+            . "  br label %cl\n"
+            . "nocall:\n  br label %done\n"
+            . "found:\n"
+            . '  %nnp = getelementptr inbounds i8, ptr %row, i64 ' . $nn . "\n"
+            . "  %nn = load i64, ptr %nnp\n"
+            . '  %ntp = getelementptr inbounds i8, ptr %row, i64 ' . $nt . "\n"
+            . "  %names = load ptr, ptr %ntp\n"
+            . "  br label %nl\n"
+            . "nl:\n"
+            . "  %a = phi i64 [ 0, %found ], [ %a2, %nchk ]\n"
+            . "  %b = phi i64 [ %nn, %found ], [ %b2, %nchk ]\n"
+            . "  %more2 = icmp slt i64 %a, %b\n"
+            . "  br i1 %more2, label %nchk, label %scan\n"
+            . "nchk:\n"
+            . "  %s2 = add i64 %a, %b\n"
+            . "  %md = lshr i64 %s2, 1\n"
+            . '  %o2 = mul i64 %md, ' . $ns . "\n"
+            . "  %r2 = getelementptr inbounds i8, ptr %names, i64 %o2\n"
+            . '  %h2p = getelementptr inbounds i8, ptr %r2, i64 ' . $nh . "\n"
+            . "  %h2 = load i64, ptr %h2p\n"
+            . "  %less = icmp slt i64 %h2, %hash\n"
+            . "  %md1 = add i64 %md, 1\n"
+            . "  %a2 = select i1 %less, i64 %md1, i64 %a\n"
+            . "  %b2 = select i1 %less, i64 %b, i64 %md\n"
+            . "  br label %nl\n"
+            . "scan:\n"
+            . "  %i = phi i64 [ %a, %nl ], [ %i2, %snext ]\n"
+            . "  %in = icmp slt i64 %i, %nn\n"
+            . "  br i1 %in, label %sh, label %lacks\n"
+            . "sh:\n"
+            . '  %o3 = mul i64 %i, ' . $ns . "\n"
+            . "  %r3 = getelementptr inbounds i8, ptr %names, i64 %o3\n"
+            . '  %h3p = getelementptr inbounds i8, ptr %r3, i64 ' . $nh . "\n"
+            . "  %h3 = load i64, ptr %h3p\n"
+            . "  %same = icmp eq i64 %h3, %hash\n"
+            . "  br i1 %same, label %scmp, label %lacks\n"
+            . "scmp:\n"
+            . '  %p3p = getelementptr inbounds i8, ptr %r3, i64 ' . $np . "\n"
+            . "  %p3 = load ptr, ptr %p3p\n"
+            . "  %c = call i32 @strcmp(ptr %p3, ptr %name)\n"
+            . "  %z = icmp eq i32 %c, 0\n"
+            . "  br i1 %z, label %has, label %snext\n"
+            . "snext:\n  %i2 = add i64 %i, 1\n  br label %scan\n"
+            . "has:\n  br label %done\n"
+            . "lacks:\n  br label %done\n"
+            . "done:\n  %res = phi i64 [ 0, %nocall ], [ 0, %has ], [ 1, %lacks ]\n"
+            . "  %w0 = load i64, ptr %ic\n"
+            . "  %ic1 = getelementptr inbounds i64, ptr %ic, i64 1\n"
+            . "  store i64 %w0, ptr %ic1\n"
+            . "  %nw = or i64 %desc, %res\n"
+            . "  store i64 %nw, ptr %ic\n"
+            . "  ret i64 %res\n}\n\n";
+    }
+
     /** Runtime lookup in a lightweight `{ count, rows }` method table. */
     public static function dynamicMethodRuntime(): string
     {

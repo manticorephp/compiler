@@ -110,6 +110,19 @@ reflects pays 8 rodata bytes per class and nothing else. Its layout (`RMETA_*`,
 `RMETA_SIZE = 104`, plus method / param / attribute row shapes) lives in `MemoryAbi.php`;
 it is metadata, not a memory-management contract, and is not duplicated here.
 
+### 3.4 Dispatch tables and inline caches
+
+Table-driven dynamic dispatch (`docs/design/table-dispatch.md`) reads constant tables
+through generic routines, with a one-word inline cache per call site. Every row layout
+and cache encoding is a `MemoryAbi` constant:
+
+- `MAGIC_ONLY_*` — the per-module table of classes with `__call` and their method names,
+  read by `@__mc_magic_only_find`. Module-local data: it crosses no object boundary, so
+  it carries no `VERSION` bump.
+- `IC_VERDICT_BIT`, `VERDICT_IC_*` — a verdict cache is one global per site, `{ w0, w1, lname, lhash }`: two cache words, newest first, each `descriptor | verdict`, then the site's constant key, read on a miss; descriptors are
+  8-byte aligned, so bit 0 is free. One aligned word: a reader never sees a torn pair.
+  Zero-initialised, never invalidated (the program is closed).
+
 ### 3.1 `rc_word` encoding
 
 One i64 at offset 8:

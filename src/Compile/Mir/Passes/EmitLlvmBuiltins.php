@@ -9402,6 +9402,20 @@ trait EmitLlvmBuiltins
         if ($lm === '__invoke' || \in_array($lm, ['bind', 'bindto', 'call', 'fromcallable', 'getcurrent'], true)) {
             return $this->biMethodExistsDynamic($args);
         }
+        $this->ensureMethodClassIds();
+        $ids = $this->methodClassIds[\strtolower($m)] ?? [];
+        if ($args[0]->type->kind !== Type::KIND_CELL) {
+            return $this->emitClassIdTest($args[0], $ids);
+        }
+        return $this->biMethodExistsErasedCell($args, $ids);
+    }
+
+    /**
+     * Build {@see $methodClassIds}: lower-cased method name => the ids of every class (enum, `Closure`)
+     * that has it, inherited included — what `method_exists($obj, 'm')` answers per class.
+     */
+    private function ensureMethodClassIds(): void
+    {
         if ($this->methodClassIds === null) {
             $idx = [];
             foreach ($this->reflMethodOwners() as $owner) {
@@ -9419,10 +9433,15 @@ trait EmitLlvmBuiltins
             }
             $this->methodClassIds = $idx;
         }
-        $ids = $this->methodClassIds[\strtolower($m)] ?? [];
-        if ($args[0]->type->kind !== Type::KIND_CELL) {
-            return $this->emitClassIdTest($args[0], $ids);
-        }
+    }
+
+    /**
+     * {@see biMethodExistsErased} over a cell subject: a class name or an object, decided at run time.
+     * @param Node[] $args
+     * @param int[] $ids
+     */
+    private function biMethodExistsErasedCell(array $args, array $ids): string
+    {
         $out = $this->emitNode($args[0]);
         $out .= $this->coerceToI64();
         $w = $this->lastValue;

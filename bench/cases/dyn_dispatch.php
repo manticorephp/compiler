@@ -41,3 +41,11 @@ bench('prop-read mono', function (int $n) use ($mono, $p): int { $s = 0; for ($i
 bench('prop-read poly', function (int $n) use ($poly, $p): int { $s = 0; for ($i = 0; $i < $n; $i++) { $s += $poly[$i & 3]->$p; } return $s; }, $reps);
 bench('prop-write mono', function (int $n) use ($mono, $qn): int { $q = $qn; for ($i = 0; $i < $n; $i++) { $mono->$q = $i; } return $mono->n; }, $reps);
 bench('new-cls poly', function (int $n) use ($classes): int { $s = 0; for ($i = 0; $i < $n; $i++) { $c = $classes[$i & 3]; $o = new $c(); $s += $o->w; } return $s; }, $reps >> 2);
+// Fixed-name sites the compiler cannot resolve to one body: a 4-way union receiver (vdisp), and an
+// erased receiver some class answers only through __call (the magic-only verdict).
+final class Prox { /** @param array<int,mixed> $a */ public function __call(string $m, array $a): mixed { return (int)$a[0] + 1; } }
+function erase_obj(mixed $o): mixed { return $o; }
+bench('vcall mono', function (int $n) use ($poly): int { $s = 0; for ($i = 0; $i < $n; $i++) { $s += $poly[0]->area($i); } return $s; }, $reps);
+bench('vcall poly', function (int $n) use ($poly): int { $s = 0; for ($i = 0; $i < $n; $i++) { $s += $poly[$i & 3]->area($i); } return $s; }, $reps);
+bench('magic-mixed mono', function (int $n) use ($mono): int { $e = erase_obj($mono); $s = 0; for ($i = 0; $i < $n; $i++) { $s += (int)$e->area($i); } return $s; }, $reps);
+bench('magic-mixed poly', function (int $n) use ($mono): int { $es = [erase_obj($mono), erase_obj(new Prox())]; $s = 0; for ($i = 0; $i < $n; $i++) { $s += (int)$es[$i & 1]->area($i); } return $s; }, $reps);

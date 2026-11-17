@@ -500,6 +500,35 @@ final class MemoryAbi
     public const DYN_METHOD_VIS_PRIVATE = 2;
 
     /**
+     * The MAGIC-ONLY table: may an erased `$v->m()` only be answered by `__call`?
+     * One row per class that has `__call` (inherited included), sorted by class id:
+     * `{ i64 class_id, i64 nnames, ptr names }`. `names` is `[nnames x { i64 hash,
+     * ptr lname }]`, every method the class has (php's `method_exists` set) lower-cased,
+     * sorted by (hash, lname); `hash` is FNV-1a of the lower-cased name, computed at
+     * compile time on both sides. A class absent from the table has no `__call`.
+     * Module-local data read by the one generic `@__mc_magic_only_find`.
+     */
+    public const MAGIC_ONLY_ROW_SIZE = 24;
+    public const MAGIC_ONLY_ROW_CID_OFFSET = 0;
+    public const MAGIC_ONLY_ROW_NNAMES_OFFSET = 8;
+    public const MAGIC_ONLY_ROW_NAMES_OFFSET = 16;
+    public const MAGIC_ONLY_NAME_SIZE = 16;
+    public const MAGIC_ONLY_NAME_HASH_OFFSET = 0;
+    public const MAGIC_ONLY_NAME_PTR_OFFSET = 8;
+
+    /**
+     * A VERDICT inline cache, one mutable global per call site: `{ i64 w0, i64 w1, ptr lname,
+     * i64 lhash }`. `w0`/`w1` are the cache (newest first, zero = empty), each the class
+     * descriptor pointer the verdict was computed for OR'd with the verdict in bit 0
+     * (descriptors are 8-byte aligned) — one aligned word, so a reader never sees a descriptor
+     * paired with another class's verdict. `lname`/`lhash` are the site's constant key (the
+     * lower-cased method name and its FNV-1a hash), read only on a miss.
+     */
+    public const IC_VERDICT_BIT = 1;
+    public const VERDICT_IC_NAME_OFFSET = 16;
+    public const VERDICT_IC_HASH_OFFSET = 24;
+
+    /**
      * `ptr` — `@__mir_props_<id>`, or null for a class with neither declared
      * properties nor a bag. Returns the object's properties as a FRESH assoc
      * (declared first, then the bag); how `json_encode` / `(array)` /
