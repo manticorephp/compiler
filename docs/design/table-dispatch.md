@@ -469,3 +469,25 @@ Where the implementation departs from the plan above, and why:
   union ran 29.0 → 16.3 ms (bench `vcall8 mono`), 2- and 8-way sites unchanged, 4-class
   shapes keep their thunk. Worth revisiting only together with a cheaper adapter story (arms
   that box/re-coerce through a shared descriptor routine, as 2b plans for trampolines).
+
+## Phase C notes
+
+- **C2, trampolines (built).** A trampoline makes one call and takes omitted arguments from the
+  `__mc_pdef_*` default factories reflection already synthesizes, instead of an arm per arity.
+  symfony `__mc_rtramp_` 37.7 → 31.6 MB, laravel 135.0 → 117.2 MB. Arms remain where an
+  explicit default is observable or unavailable: a class whose source counts its arguments
+  (`func_get_args` and friends — detected per source file, since bodies are not lowered yet), a
+  by-reference parameter, no factory, no reflection.
+- **C1, the descriptor + runtime binder (not built).** What remains of a trampoline after C2 is
+  per-parameter coercion (an int check with its TypeError, a string render with its own
+  retain/release, enum ordinals, float unboxing, payload masks) plus fixed frame work (receiver
+  check, arena, backtrace site, exception checks). A runtime binder would have to re-implement
+  `unboxCellToType` and its error texts as a second, hand-written authority beside the emitter's —
+  the two-sources-of-truth arrangement the tree avoids elsewhere (`cellTagIr`'s note) — and the
+  per-callee adapter would still need typed native arguments the MIR can only express by
+  re-coercing. It is worth building only together with making `unboxCellToType` itself table-
+  driven (one routine both the emitter and the binder call), which is a change to every typed
+  call boundary, not to dispatch.
+- **C3 (spread fill, dynarm, static callables, callable-string thunks) and C4 (vdisp) not
+  attempted:** each was to ride the C1 binder; without it their arms carry the same per-argument
+  coercion C2 could not remove, and C4's adapters are exactly that coercion.

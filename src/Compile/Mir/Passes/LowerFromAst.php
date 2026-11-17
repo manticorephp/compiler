@@ -1424,6 +1424,45 @@ final class LowerFromAst implements Pass
             }
             \Compile\Mir\Passes\TrampolineSynth::$bindByName = $module->namedSpread;
             \Compile\Mir\Passes\TrampolineSynth::$ctorCall = true;
+            // The parameter-default factories come first: a trampoline whose callee
+            // can take its defaults explicitly calls them instead of carrying an arm
+            // per arity ({@see TrampolineSynth::arms}). Declared now, lowered with
+            // the other factories once the constant tables are complete (below).
+            $defaultFactories = [];
+            foreach ($this->synthParamDefaultFactories($module) as $decl) {
+                $this->declareFn($decl->name, $decl);
+                $this->pendingSynthFns[] = $decl;
+                $defaultFactories[$decl->name] = true;
+            }
+            // A callee that counts its arguments must see the count it was called
+            // with, which only an arm per arity passes: keep arms for every class
+            // whose source (or a used trait's) mentions func_get_arg(s)/func_num_args.
+            // The bodies are not lowered yet, so this reads the files; a class with
+            // no file (the prelude blob) counts as one that might.
+            /** @var array<string, bool> $fileCounts */
+            $fileCounts = [];
+            $funcArgsClasses = [];
+            foreach ($module->classes as $cd) {
+                $cdecl = $this->classDecls[$cd->name] ?? null;
+                if ($cdecl === null) { continue; }
+                $files = [$cdecl->span->file];
+                foreach ($this->usedTraitsFlat($cdecl) as $tn) {
+                    $tdecl = $this->traitTable[\ltrim($tn, '\\')] ?? null;
+                    if ($tdecl !== null) { $files[] = $tdecl->span->file; }
+                }
+                foreach ($files as $file) {
+                    if (!isset($fileCounts[$file])) {
+                        $src = 'func_get_args';
+                        if ($file !== '') {
+                            try { $src = (string)\file_get_contents($file); } catch (\Throwable $e) { $src = 'func_get_args'; }
+                        }
+                        $fileCounts[$file] = \str_contains($src, 'func_get_arg') || \str_contains($src, 'func_num_args');
+                    }
+                    if ($fileCounts[$file]) { $funcArgsClasses[\strtolower($cd->name)] = true; break; }
+                }
+            }
+            \Compile\Mir\Passes\TrampolineSynth::$defaultFactories = $defaultFactories;
+            \Compile\Mir\Passes\TrampolineSynth::$funcArgsClasses = $funcArgsClasses;
             $trampSrc = '';
             foreach ($module->classes as $cd) {
                 $trampSrc .= \Compile\Mir\Passes\TrampolineSynth::sourceFor($cd);
@@ -1452,10 +1491,6 @@ final class LowerFromAst implements Pass
             // The declaration still has to be registered NOW: the params pre-pass
             // right below reads `$this->fnDecls`.
             foreach ($this->synthAttrFactories($module) as $decl) {
-                $this->declareFn($decl->name, $decl);
-                $this->pendingSynthFns[] = $decl;
-            }
-            foreach ($this->synthParamDefaultFactories($module) as $decl) {
                 $this->declareFn($decl->name, $decl);
                 $this->pendingSynthFns[] = $decl;
             }
@@ -1866,6 +1901,8 @@ final class LowerFromAst implements Pass
             if (!$this->includeReflection) {
                 \Compile\Mir\Passes\TrampolineSynth::$bindByName = $module->namedSpread;
                 \Compile\Mir\Passes\TrampolineSynth::$ctorCall = false;
+                // No default factories outside reflection: every trampoline keeps its arms.
+                \Compile\Mir\Passes\TrampolineSynth::$defaultFactories = [];
                 $dynamicTrampSrc = '';
                 foreach ($module->classes as $cd) {
                     $dynamicTrampSrc .= \Compile\Mir\Passes\TrampolineSynth::sourceFor($cd);

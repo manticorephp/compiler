@@ -1,0 +1,10 @@
+1 x null 7 slow {"k":1} 2.5 fresh
+2 y null 7 slow {"k":1} 2.5 fresh
+3 z given 9 fast [] 1 fresh
+boxes made: 4
+4 x null 7 slow {"k":1} 2.5 fresh
+PQ:0
+1+5 n=1 | 1+2 n=2
+3+5 n=1
+box n
+boxes made: 7
