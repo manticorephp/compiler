@@ -1,5 +1,6 @@
 <?php
 // A dynamic property read through a parent-typed receiver misses the subclass's declared property.
+// issue: #710
 abstract class Shape {}
 final class Sq extends Shape { public int $w = 3; }
 final class Re extends Shape { public int $w = 2; }
