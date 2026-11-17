@@ -1,0 +1,2 @@
+h(): Argument #1 ($o) must be of type Foo, Bar given
+h(): Argument #1 ($o) must be of type Foo, null given

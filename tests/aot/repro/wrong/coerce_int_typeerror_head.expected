@@ -1,0 +1,3 @@
+f(): Argument #1 ($x) must be of type int, null given
+line ok
+f(): Argument #1 ($x) must be of type int, array given
