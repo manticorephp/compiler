@@ -1,6 +1,6 @@
 # Table-driven dynamic dispatch
 
-Status: design (phase A). Nothing here is implemented yet.
+Status: steps 1–3 of the ranking implemented, step 4 built and parked (phase B, see the notes at the end); the rest is design.
 
 ## Problem
 
@@ -435,3 +435,37 @@ and goes last, then 7 and 10 fall out of its table.
 5. Row-size change of `DYN_METHOD_ROW_*` and new descriptor fields: a memory-ABI
    change, shipped by a plain `bin/build` per AGENTS.md — confirm no external
    consumer reads the dyn-method row (none found in `src/`, `prelude/`).
+
+## Phase B notes (steps 1–4 as built)
+
+Where the implementation departs from the plan above, and why:
+
+- **Magic-only (1).** Built as planned (MAGIC_ONLY table, generic find, per-site cache), with
+  two residuals. A name no class answers only through `__call` is a constant 0, no call at all.
+  A name at most four classes answer that way keeps a tiny pure per-name class-id test: a cache
+  write makes the verdict impure, so an inlined copy can no longer be hoisted out of a loop, and
+  for a handful of classes the test is less code than a call plus a cache global. The verdict
+  cache is two words (newest first), so a site alternating between two classes stays a hit.
+- **Metadata (2).** Only the docblock/line factory (`__mc_cdoc_`) changed: its value is constant
+  data, emitted as one serialized string literal decoded by the existing native decoder
+  (`__mc_unser_native`). `__mc_consts_` builds from constant EXPRESSIONS (enum cases, `new`,
+  other classes' constants) that are not known before lowering, so it stays code;
+  `__mc_cfile_` (≈270 B a class) and the attribute factories were not worth a change.
+- **Trampoline arity (3).** Not moved into the callers. The guard stays in each trampoline as a
+  compare and one call to a shared `__mc_tramp_too_few`, which builds and throws the
+  ArgumentCountError: that is where the ~75 lines per trampoline were, and it needs no row-layout
+  change and no change to the five callers (reflection invoke, dyn-method dispatch/try-call,
+  `new $cls`).
+- **Virtual dispatch (4) — parked.** Built and green (branch `perf/table-dispatch-vcall`): sites
+  of a shape with five or more instantiable classes call a generic `__mc_vcall_<argc>` with a
+  per-site four-way cache (plus a megamorphic switch) and the shape's open-addressed class-id
+  table; arms the callee takes unchanged point at the callee, the rest at a content-addressed
+  adapter. It does not pay: on symfony-app `__mir_vdisp_` fell 27.0 → 13.4 MB, but 8 959
+  adapters (6.8 MB), 1 103 tables (4.2 MB) and 30 646 cache globals (4.5 MB) took it back
+  (defines 585.9 → 579.6 MB, module +0.6 MiB net with the data), clang -O0 rose 11.7 → 15.0 s,
+  and the -O2 binary grew 144.0 → 147.3 MB. Most arms need per-arm re-coercion or return
+  boxing, so few rows can point at the callee itself, and the old thunks were `optnone`, which
+  made them cheap to compile. The runtime side did hold: a monomorphic site on an 8-class
+  union ran 29.0 → 16.3 ms (bench `vcall8 mono`), 2- and 8-way sites unchanged, 4-class
+  shapes keep their thunk. Worth revisiting only together with a cheaper adapter story (arms
+  that box/re-coerce through a shared descriptor routine, as 2b plans for trampolines).

@@ -49,3 +49,18 @@ bench('vcall mono', function (int $n) use ($poly): int { $s = 0; for ($i = 0; $i
 bench('vcall poly', function (int $n) use ($poly): int { $s = 0; for ($i = 0; $i < $n; $i++) { $s += $poly[$i & 3]->area($i); } return $s; }, $reps);
 bench('magic-mixed mono', function (int $n) use ($mono): int { $e = erase_obj($mono); $s = 0; for ($i = 0; $i < $n; $i++) { $s += (int)$e->area($i); } return $s; }, $reps);
 bench('magic-mixed poly', function (int $n) use ($mono): int { $es = [erase_obj($mono), erase_obj(new Prox())]; $s = 0; for ($i = 0; $i < $n; $i++) { $s += (int)$es[$i & 1]->area($i); } return $s; }, $reps);
+// An eight-class union, the shape the virtual-call table (docs/design/table-dispatch.md, step 4)
+// targets: `mono` sees one class at the site, `poly2` two, `poly8` cycles all eight.
+abstract class Op { abstract public function ap(int $k): int; }
+final class O1 extends Op { public function ap(int $k): int { return $k + 1; } }
+final class O2 extends Op { public function ap(int $k): int { return $k + 2; } }
+final class O3 extends Op { public function ap(int $k): int { return $k + 3; } }
+final class O4 extends Op { public function ap(int $k): int { return $k + 4; } }
+final class O5 extends Op { public function ap(int $k): int { return $k + 5; } }
+final class O6 extends Op { public function ap(int $k): int { return $k + 6; } }
+final class O7 extends Op { public function ap(int $k): int { return $k + 7; } }
+final class O8 extends Op { public function ap(int $k): int { return $k + 8; } }
+$ops = [new O1(), new O2(), new O3(), new O4(), new O5(), new O6(), new O7(), new O8()];
+bench('vcall8 mono', function (int $n) use ($ops): int { $s = 0; for ($i = 0; $i < $n; $i++) { $s += $ops[($i & 0) + 2]->ap($i); } return $s; }, $reps);
+bench('vcall8 poly2', function (int $n) use ($ops): int { $s = 0; for ($i = 0; $i < $n; $i++) { $s += $ops[$i & 1]->ap($i); } return $s; }, $reps);
+bench('vcall8 poly8', function (int $n) use ($ops): int { $s = 0; for ($i = 0; $i < $n; $i++) { $s += $ops[$i & 7]->ap($i); } return $s; }, $reps);
