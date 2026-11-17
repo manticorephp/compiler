@@ -1,6 +1,6 @@
 # Table-driven argument coercion
 
-Status: S1–S5 built (phase B, notes at the end); S6 and S7 are design.
+Status: S1–S5 built (phase B, notes at the end); S6 spread half built (S6 notes); S6 trampolines and S7 are design.
 Follows [table-dispatch.md](table-dispatch.md), "Phase C notes": a runtime argument binder for the
 dispatch helpers is worth building only if coercion itself becomes one routine that both the
 emitter and the binder call. This document measures what coercion costs today and plans that
@@ -339,3 +339,52 @@ time on both binaries. Worker CPU per request in alternating runs was 75.7 µs (
 
 Next (S6, the pack binder) needs a re-census of what is left in `__mc_rtramp_` / `__mir_spfill_`.
 Coercion is now a call per parameter, so only the decode remains to be won there.
+
+## S6 notes (spread binder as built)
+
+Re-census at e768b428 (symfony `-O0 --keep-ir`, every `define` charged to its family, then each
+dispatch body split per line: pack decode — count, name lookups, `value_at` / `get_int`,
+`elem_decode`, deref, arity checks, default fill — vs the coercion calls vs the rest):
+
+| family | defines MB | decode | coercion | other |
+|---|---:|---:|---:|---:|
+| `__mc_rtramp_` / `fntramp_` | 29.5 | 21.3 | 1.6 | 6.6 |
+| `__mir_spfill_` | 17.0 | 15.4 | 0.7 | 0.9 |
+| `__mc_static_callable*` | 8.5 | 7.0 | 0.3 | 1.2 |
+| `__mir_dynf*` | 5.8 | 4.5 | 0.5 | 0.8 |
+| `__mir_dynarm_` | 23.1 | 1.6 | 2.8 | 18.7 (the `__call` repack + vdisp; its decode is a spfill call) |
+| all defines | 567.4 | 49.8 (8.8 %) | | |
+
+Built: **the spread half**. `emitSpreadFill` (every `...$pack` into a known callee: spfill
+helpers, static-callable arms, dynf thunks, user sites, the bind-by-name trampolines) binds an
+erased pack's fixed parameters through one module-internal routine, `__mc_spbind`, driven by a
+content-named `[N x i64]` descriptor (`MemoryAbi::SPREAD_BIND_*`): per parameter its kind (the
+arms of `unboxCellToTypeRaw`), deref, required, conform code, name and a constant default. The
+routine keeps the inline order (name lookups, the unknown-name Error, then per parameter pick,
+decode, coerce, ArgumentCountError) and calls the same helpers and raise helpers, so texts and
+thrown objects are unchanged. A fill that is the call alone is made by the vdisp arm itself
+(spfill helpers 6 576 → 3 004). Inline form kept for a concrete pack, a by-ref parameter and a
+default that is not a literal / `[]`. Deviation from the plan: no generic `__mc_co`; the
+descriptor's kind byte selects the helper inside the binder. One behaviour difference: a missing
+element is no longer coerced (the inline form unboxed the word 0, which for an enum parameter
+dereferenced address 16).
+
+Above `-O0` the binder is `alwaysinline`: called, its frame and spills cost `$c::$f()` 4 % in
+`dyn_dispatch`; inlined against the constant descriptor it folds back to the straight-line fill.
+So the win is `-O0` / IR volume; the cold `-O2` binary is flat (140.4 → 140.3 MB).
+
+| step | commit | symfony defines MB | `-O0` binary MB |
+|---|---|---:|---:|
+| base | e768b428 | 567.4 | 164.0 |
+| spread binder | 585de620 | 547.2 | 154.0 (155.9 rebuilt later) |
+| constant defaults, direct arm call | 64990b28 | 545.4 | 155.4 |
+
+The `-O0` binary moves ±1–2 MB between rebuilds of the same compiler (the two c1 numbers); the
+IR census is exact. Microbench (min of 5, `-O2`, interleaved with the base): every
+`typed_coerce` and `dyn_dispatch` row within ±1 ms or 1 %, except `vcall8 poly2/poly8`
+(5→6, 7→10 ms) whose closure and vdisp machine code is byte-identical to the base (layout).
+
+Left: the trampolines (21 MB of decode, the largest item). They are PHP source whose call
+coerces through `unboxCellArg`, which the binder does not model: the object guard with a php
+head, an owned rendered string released after the call, the `$a[k]` int-key read (not the
+positional one), `__mc_pdef_*` factories with their backtrace site, and `__mc_tramp_too_few`.
