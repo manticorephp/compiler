@@ -1,6 +1,6 @@
 # Table-driven argument coercion
 
-Status: design (phase A: census + plan). Nothing here is built.
+Status: S1–S5 built (phase B, notes at the end); S6 and S7 are design.
 Follows [table-dispatch.md](table-dispatch.md), "Phase C notes": a runtime argument binder for the
 dispatch helpers is worth building only if coercion itself becomes one routine that both the
 emitter and the binder call. This document measures what coercion costs today and plans that
@@ -278,3 +278,64 @@ shrink by a similar fraction. Measure with `--timings` per step.
    should the class set be a link-time constant the program's class table exports?
 4. S7's float / object / strict_types fixes change behaviour for programs that rely on today's
    leniency (`docs/differences.md` #402). One PR per item with difftest, or one batch?
+
+## Phase B notes (S1–S5 as built)
+
+Base 9c6845f1 (+ the pinning case); every step keeps today's behaviour byte for byte: a probe
+over every cell → typed boundary (int, string, float, bool, object, return, property, receiver
+× null / int / numeric string / string / bool / array / object) prints the same bytes as the base
+binary after each step, `tests/aot/cases/coerce_messages_pinned.php` pins the rows that already
+equal php, and every step was three `bin/build` generations hash-stable.
+
+What changed from the plan:
+
+- **No 32-byte descriptor.** What varies per site is only the message, so the "descriptor" is a
+  `private constant [n x ptr]` of the site's literal messages (`@.coem.<content hash>`, through
+  the existing `litTableSym`), one entry per kind the inline code could report. A cold helper
+  indexes it by the value's kind and raises through the module's existing raise helper. The
+  thrown object is the one the inline raise built (file, line 0, trace), and the message is the
+  immortal literal it used. A first cut built the text at run time with `__mir_concat`: the raise
+  helper returns with the exception slot set, the exception lowering jumps straight to propagate,
+  and the releases after it never ran, so the cut leaked one string per throw. Tables have
+  nothing to free. Every argument site shares one table (`Argument must be of type int, …`);
+  property sites get one per property.
+- **The helpers are module-internal** (`_m<token>`, like the raise helpers they call), because
+  the raise helper is.
+- **Exception checks.** The tag tests (`__mc_recv_bad`, `__manticore_cell_str_own`) are on the
+  `nounwind` list, so the hot path gets no `@__mc_exc` load. The string-cast helper ends every
+  path at its one may-throw call and is skipped by the exception lowering, so its caller checks
+  once.
+- **Int slow path** calls `__manticore_cell_int_bad_slow` / `__manticore_cell_to_int_arg_slow`
+  directly. Through their `alwaysinline` wrappers the numeric-string row was 4 % slower (an extra
+  frame plus the repeated fast checks).
+- **String cast** answers a string cell with its retained payload and makes no call (the old
+  path called `__manticore_tagged_to_str` for it). The helper is not `alwaysinline`: inlining it
+  did not move the int→string row, and the S5 wrappers forced inline grew the `-O0` binary by
+  1 MB (the `-O0` inliner leaves the copies uncleaned).
+- **S4** is the receiver guard's code: `emitObjArgGuard` and the receiver guard are one function
+  (`__mc_tag_fail.<class>`).
+
+| step | commit | symfony defines MB | module MB | `-O0` binary MB |
+|---|---|---:|---:|---:|
+| base | 9c6845f1 | 596.3 | 674.2 | 170.7 |
+| S1 receiver guard | 9de82f66 | 579.2 | 655.5 | 167.0 |
+| S3 int | 5095dc89 | 568.3 | 647.5 | 165.5 |
+| S2 string cast | 2fb11cda | 559.8 | 638.9 | 164.1 |
+| S5 string unbox | bc16cc11 | 558.7 | 637.8 | 164.1 |
+| S4 object argument | ce4b2810 | 558.4 | 637.6 | 164.0 |
+
+Laravel `-O0`: defines 1 655.9 → 1 575.8 MB (−4.8 %), module 1 933 → 1 855 MB, binary 506.7 →
+491.6 MB. symfony `-O2` cold (no object or ThinLTO cache): binary 142.9 → 140.4 MB. Build wall
+time 209 / 213 s → 166 / 190 s, but other sessions held the load average at 25–100, so the
+times only show the direction.
+
+Microbench (min of 5 runs at `-O2`, ms, base → S4): typed_coerce cell→int 41 → 37, numeric
+string 238 → 239, cell→string 102 → 71, int→string 158 → 163 (+3 %, about 2 % in isolation),
+cell→object 62 → 45, cell receiver 61 → 45, int property 32 → 29, int return 39 → 32. The
+dyn_dispatch rows are unchanged within ±1 ms. symfony `/` under `wrk` (one worker, 20 s, load
+average 22–35): requests/s ran 2–14 % lower on the branch, with the same downward drift over
+time on both binaries. Worker CPU per request in alternating runs was 75.7 µs (base) vs 75.3 µs
+(branch). Repeat the throughput check on a quiet machine before merging.
+
+Next (S6, the pack binder) needs a re-census of what is left in `__mc_rtramp_` / `__mir_spfill_`.
+Coercion is now a call per parameter, so only the decode remains to be won there.
