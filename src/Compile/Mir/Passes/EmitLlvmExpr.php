@@ -4923,49 +4923,45 @@ trait EmitLlvmExpr
     private function coerceCellToStr(string $v): string
     {
         $this->rt->needsTaggedToStr = true;
-        if (!$this->hasObjToStr) {
-            $r = $this->ssa->allocReg();
-            $out = '  ' . $r . ' = call ptr @__manticore_tagged_to_str(i64 ' . $v . ")\n";
-            $out .= $this->cellStrResultOwnIr($v, $r);
-            $this->lastValue = $r;
-            $this->lastValueType = 'ptr';
-            return $out;
-        }
-        $slot = $this->ssa->allocReg();
-        $out = '  ' . $slot . " = alloca ptr\n";
-        $isBox = $this->ssa->allocReg();
-        $out .= '  ' . $isBox . ' = icmp ugt i64 ' . $v . ", -4503599627370496\n";
-        $ts = $this->ssa->allocReg();
-        $out .= '  ' . $ts . ' = lshr i64 ' . $v . ", 48\n";
-        $nib = $this->ssa->allocReg();
-        $out .= '  ' . $nib . ' = and i64 ' . $ts . ", 15\n";
-        $isObjNib = $this->ssa->allocReg();
-        $out .= '  ' . $isObjNib . ' = icmp eq i64 ' . $nib . ", 8\n";
-        $isObj = $this->ssa->allocReg();
-        $out .= '  ' . $isObj . ' = and i1 ' . $isBox . ', ' . $isObjNib . "\n";
-        $objL = $this->ssa->allocLabel('o2s.obj');
-        $scaL = $this->ssa->allocLabel('o2s.scalar');
-        $endL = $this->ssa->allocLabel('o2s.end');
-        $out .= '  br i1 ' . $isObj . ', label %' . $objL . ', label %' . $scaL . "\n";
-        $out .= $objL . ":\n";
-        $os = $this->ssa->allocReg();
-        // The dispatcher takes the CELL itself: its arms are `instanceof`, which
-        // unboxes on the tag the same way every other cell consumer does.
-        $out .= $this->objToStrCallIr($v, $os);
-        $out .= '  store ptr ' . $os . ', ptr ' . $slot . "\n";
-        $out .= '  br label %' . $endL . "\n";
-        $out .= $scaL . ":\n";
-        $ss = $this->ssa->allocReg();
-        $out .= '  ' . $ss . ' = call ptr @__manticore_tagged_to_str(i64 ' . $v . ")\n";
-        $out .= '  store ptr ' . $ss . ', ptr ' . $slot . "\n";
-        $out .= '  br label %' . $endL . "\n";
-        $out .= $endL . ":\n";
-        $res = $this->ssa->allocReg();
-        $out .= '  ' . $res . ' = load ptr, ptr ' . $slot . "\n";
-        $out .= $this->cellStrResultOwnIr($v, $res);
-        $this->lastValue = $res;
+        $this->rt->needsStrRc = true;
+        $r = $this->ssa->allocReg();
+        $this->lastValue = $r;
         $this->lastValueType = 'ptr';
-        return $out;
+        return '  ' . $r . ' = call ptr ' . $this->cellToStrHelper() . '(i64 ' . $v . ")\n";
+    }
+
+    /**
+     * The module's cell → string cast as one function, its result the caller's: a string cell is
+     * its payload, retained; an object goes through `__toString` ({@see objToStrCallIr}) when the
+     * module has the dispatcher; anything else through `__manticore_tagged_to_str`. Inline, the
+     * two diamonds were ~1 KB of IR at each of ~10k sites of a Symfony app.
+     */
+    private function cellToStrHelper(): string
+    {
+        $key = $this->hasObjToStr ? 'c2s.obj' : 'c2s';
+        $sym = '@' . $this->mirHelperSym($this->hasObjToStr ? '__mc_cell_to_str_o' : '__mc_cell_to_str');
+        if (isset($this->dynamicMethodHelpers[$key])) { return $sym; }
+        $oldSsa = $this->ssa;
+        $oldLast = $this->lastValue;
+        $oldLastType = $this->lastValueType;
+        $this->ssa = new \Compile\Mir\SsaBuilder();
+        $this->ssa->reset();
+        $mask = (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK;
+        $body = "  %istag = icmp ugt i64 %v, " . (string)\Compile\MemoryAbi::CELL_TAGGED_MIN . "\n"
+            . "  %ts = lshr i64 %v, 48\n  %nib = and i64 %ts, 15\n"
+            . "  %isS = icmp eq i64 %nib, 4\n  %str = and i1 %istag, %isS\n  br i1 %str, label %asstr, label %other\n"
+            . "asstr:\n  %pw = and i64 %v, " . $mask . "\n  %p = inttoptr i64 %pw to ptr\n"
+            . "  call void @__mir_rc_retain_str(ptr %p)\n  ret ptr %p\nother:\n";
+        if ($this->hasObjToStr) {
+            $body .= "  %isO = icmp eq i64 %nib, 8\n  %obj = and i1 %istag, %isO\n  br i1 %obj, label %asobj, label %scalar\n"
+                . "asobj:\n" . $this->objToStrCallIr('%v', '%os') . "  ret ptr %os\nscalar:\n";
+        }
+        $body .= "  %r = call ptr @__manticore_tagged_to_str(i64 %v)\n" . $this->cellStrResultOwnIr('%v', '%r') . "  ret ptr %r\n";
+        $this->dynamicMethodHelpers[$key] = 'define internal ptr ' . $sym . "(i64 %v) {\nentry:\n" . $body . "}\n\n";
+        $this->ssa = $oldSsa;
+        $this->lastValue = $oldLast;
+        $this->lastValueType = $oldLastType;
+        return $sym;
     }
 
     /**
