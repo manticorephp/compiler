@@ -6845,8 +6845,9 @@ trait EmitLlvmExpr
     /**
      * A method called on a CELL that holds a tagged int / string / bool is php's Error
      * (`Call to a member function m() on false`). One shared tag test and a cold call to
-     * {@see recvFailHelper}: built inline per site, the test, the four message literals and the
-     * raise were ~1.1 KB of IR at each of ~20k sites of a Symfony app. lastValue is left as it was.
+     * {@see recvFailHelper} with the site's four messages as one constant table: built inline per
+     * site, the test, the four message literals and the raise were ~1.1 KB of IR at each of ~20k
+     * sites of a Symfony app. lastValue is left as it was.
      */
     private function emitRecvGuard(string $method, string $v): string
     {
@@ -6855,17 +6856,36 @@ trait EmitLlvmExpr
         if ($fn === '') { return $this->emitObjArgGuard($head, '', 'Error'); }
         $this->rt->needsRecvBad = true;
         $this->rt->needsTagged = true;
+        $tbl = $this->coerceMsgTable([$head . 'int', $head . 'string', $head . 'false', $head . 'true']);
         $bad = $this->ssa->allocReg();
         $fail = $this->ssa->allocLabel('recv.bad');
         $ok = $this->ssa->allocLabel('recv.ok');
         return '  ' . $bad . ' = call i1 @__mc_recv_bad(i64 ' . $v . ")\n"
             . '  br i1 ' . $bad . ', label %' . $fail . ', label %' . $ok . "\n" . $fail . ":\n"
-            . '  call void ' . $fn . '(i64 ' . $v . ', ptr ' . $this->strRef($head) . ")\n"
+            . '  call void ' . $fn . '(i64 ' . $v . ', ptr ' . $tbl . ")\n"
             . "  unreachable\n" . $ok . ":\n";
     }
 
     /**
-     * The module's cold receiver-guard raise: `Error($head . <int|string|true|false>)` through the
+     * A site's TypeError / Error texts as one `private constant [n x ptr]` of immortal string
+     * literals, named by content so every site with the same texts shares it. The cold helpers
+     * pick one by the value's kind: the thrown message is the literal the inline raise used.
+     * @param string[] $msgs
+     */
+    private function coerceMsgTable(array $msgs): string
+    {
+        $ptrs = [];
+        foreach ($msgs as $m) { $ptrs[] = 'ptr ' . $this->litStr($m); }
+        $init = '[' . (string)\count($ptrs) . ' x ptr] [' . \implode(', ', $ptrs) . ']';
+        $sym = $this->litTableSym('@.coem.', $init);
+        if ($sym[1]) {
+            $this->litTableBodies .= $sym[0] . ' = private unnamed_addr constant ' . $init . ", align 8\n";
+        }
+        return $sym[0];
+    }
+
+    /**
+     * The module's cold receiver-guard raise: `Error(msgs[int|string|false|true])` through the
      * same raise helper the inline guard used, so the thrown object (file, line, trace) is the one
      * it built. '' when Error has no raise helper.
      */
@@ -6873,25 +6893,48 @@ trait EmitLlvmExpr
     {
         $raise = $this->raiseHelper('Error');
         if ($raise === '') { return ''; }
-        $key = 'recvfail';
         $sym = '@' . $this->mirHelperSym('__mc_recv_fail');
-        if (isset($this->dynamicMethodHelpers[$key])) { return $sym; }
+        if (isset($this->dynamicMethodHelpers['recvfail'])) { return $sym; }
         $this->rt->needsTagged = true;
-        $s = static fn (string $t): string => 'ptr ' . $t;
         $tag = $this->rt->needsRefCells
             ? "  %t = call i64 @__manticore_tag(i64 %v)\n"
             : "  %istag = icmp ugt i64 %v, " . (string)\Compile\MemoryAbi::CELL_TAGGED_MIN . "\n"
                 . "  %sh = lshr i64 %v, 48\n  %nr = and i64 %sh, 15\n  %is5 = icmp eq i64 %nr, 5\n"
                 . "  %n = select i1 %is5, i64 1, i64 %nr\n  %t = select i1 %istag, i64 %n, i64 6\n";
-        $this->dynamicMethodHelpers[$key] = 'define internal void ' . $sym . "(i64 %v, ptr %head) noinline cold {\nentry:\n"
+        $this->dynamicMethodHelpers['recvfail'] = 'define internal void ' . $sym . "(i64 %v, ptr %msgs) noinline cold {\nentry:\n"
             . $tag
-            . "  %isI = icmp eq i64 %t, 1\n  %isS = icmp eq i64 %t, 4\n  %bit = and i64 %v, 1\n  %isT = icmp eq i64 %bit, 1\n"
-            . '  %bn = select i1 %isT, ' . $s($this->litStr('true')) . ', ' . $s($this->litStr('false')) . "\n"
-            . '  %sn = select i1 %isS, ' . $s($this->litStr('string')) . ", ptr %bn\n"
-            . '  %nm = select i1 %isI, ' . $s($this->litStr('int')) . ", ptr %sn\n"
-            . "  %msg = call ptr @__mir_concat(ptr %head, ptr %nm)\n"
-            . "  %mi = ptrtoint ptr %msg to i64\n"
+            . "  %isI = icmp eq i64 %t, 1\n  %isS = icmp eq i64 %t, 4\n  %bit = and i64 %v, 1\n"
+            . "  %bi = add i64 %bit, 2\n  %si = select i1 %isS, i64 1, i64 %bi\n  %ix = select i1 %isI, i64 0, i64 %si\n"
+            . "  %g = getelementptr inbounds ptr, ptr %msgs, i64 %ix\n  %m = load ptr, ptr %g\n  %mi = ptrtoint ptr %m to i64\n"
             . '  call void ' . $raise . "(i64 %mi, i64 0)\n  ret void\n}\n\n";
+        return $sym;
+    }
+
+    /**
+     * The module's cell → `int` coercion: `@__mc_co_int_m…(i64 v, ptr msgs)`, `msgs` the site's
+     * [null, array, string] TypeError texts ({@see coerceMsgTable}). The int tag is the inline fast
+     * path; anything else goes to the cold half, which throws through the TypeError raise helper or
+     * converts as `__manticore_cell_to_int_arg` does. Inline, the three-arm raise was ~1 KB of IR
+     * per site. '' when TypeError has no raise helper (the caller keeps its inline form).
+     */
+    private function coIntHelper(): string
+    {
+        $raise = $this->raiseHelper('TypeError');
+        if ($raise === '') { return ''; }
+        $sym = '@' . $this->mirHelperSym('__mc_co_int');
+        if (isset($this->dynamicMethodHelpers['coint'])) { return $sym; }
+        $slow = '@' . $this->mirHelperSym('__mc_co_int_slow');
+        $this->dynamicMethodHelpers['coint'] = 'define internal i64 ' . $sym . "(i64 %v, ptr %msgs) alwaysinline {\nentry:\n"
+            . "  %hi = lshr i64 %v, 48\n  %isint = icmp eq i64 %hi, 65521\n  br i1 %isint, label %fast, label %slow\n"
+            . "fast:\n  %s = shl i64 %v, 16\n  %r = ashr i64 %s, 16\n  ret i64 %r\n"
+            . 'slow:' . "\n  %x = call i64 " . $slow . "(i64 %v, ptr %msgs)\n  ret i64 %x\n}\n\n"
+            . 'define internal i64 ' . $slow . "(i64 %v, ptr %msgs) noinline cold {\nentry:\n"
+            . "  %istag = icmp ugt i64 %v, " . (string)\Compile\MemoryAbi::CELL_TAGGED_MIN . "\n  br i1 %istag, label %tagged, label %conv\n"
+            . "tagged:\n  %bad = call i32 @__manticore_cell_int_bad_slow(i64 %v)\n  %ok = icmp eq i32 %bad, 0\n  br i1 %ok, label %conv, label %raise\n"
+            . "conv:\n  %c = call i64 @__manticore_cell_to_int_arg_slow(i64 %v)\n  ret i64 %c\n"
+            . "raise:\n  %b1 = sub i32 %bad, 1\n  %ix = zext i32 %b1 to i64\n"
+            . "  %g = getelementptr inbounds ptr, ptr %msgs, i64 %ix\n  %m = load ptr, ptr %g\n  %mi = ptrtoint ptr %m to i64\n"
+            . '  call void ' . $raise . "(i64 %mi, i64 0)\n  ret i64 0\n}\n\n";
         return $sym;
     }
 
@@ -7167,6 +7210,19 @@ trait EmitLlvmExpr
             $this->rt->needsStrtol = true;
             $keep = $this->lastValue;
             $out = '';
+            $co = $this->intGuardOff ? '' : $this->coIntHelper();
+            if ($co !== '') {
+                $msgs = [];
+                foreach (['null', 'array', 'string'] as $given) {
+                    $msgs[] = $this->unboxPropCtx !== ''
+                        ? 'Cannot assign ' . $given . ' to property ' . $this->unboxPropCtx . ' of type int'
+                        : 'Argument must be of type int, ' . $given . ' given';
+                }
+                $r = $this->ssa->allocReg();
+                $this->lastValue = $r;
+                $this->lastValueType = 'i64';
+                return '  ' . $r . ' = call i64 ' . $co . '(i64 ' . $keep . ', ptr ' . $this->coerceMsgTable($msgs) . ")\n";
+            }
             // A by-ref scratch holds a callee's OUTPUT: a null there is no argument.
             if (!$this->intGuardOff) {
                 $bad = $this->ssa->allocReg();
