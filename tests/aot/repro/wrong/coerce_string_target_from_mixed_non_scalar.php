@@ -1,5 +1,6 @@
 <?php
 // A mixed null/array/object stored to a string return or typed property passes raw bytes instead of a TypeError.
+// issue: #735
 class Foo { public string $s = ''; }
 function r(mixed $v): string { return $v; }
 function m(mixed $v): mixed { return $v; }

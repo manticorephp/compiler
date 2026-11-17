@@ -1,5 +1,6 @@
 <?php
 // A mixed string/null/array/object bound to a bool parameter is read by its low tag bit instead of php's truthiness or TypeError.
+// issue: #732
 class Foo {}
 function b(bool $x): string { return $x ? "T" : "F"; }
 function m(mixed $v): mixed { return $v; }

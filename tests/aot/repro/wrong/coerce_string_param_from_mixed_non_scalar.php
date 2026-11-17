@@ -1,5 +1,6 @@
 <?php
 // A mixed null/array bound to a string parameter is rendered instead of throwing TypeError, and an object without __toString throws the cast Error text.
+// issue: #733
 class NoStr {}
 function s(string $x): string { return "[" . $x . "]"; }
 function m(mixed $v): mixed { return $v; }

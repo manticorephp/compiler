@@ -1,5 +1,6 @@
 <?php
 // A mixed object bound to an int parameter, return or typed property yields its address instead of a TypeError.
+// issue: #734
 class Foo { public int $n = 0; }
 function i(int $x): int { return $x; }
 function r(mixed $v): int { return $v; }

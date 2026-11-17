@@ -1,5 +1,6 @@
 <?php
 // A mixed value of the wrong class, or null, bound to a class-typed parameter passes without a TypeError.
+// issue: #729
 class Foo { public int $n = 1; }
 class Bar { public int $n = 2; }
 function h(Foo $o): int { return 7; }
