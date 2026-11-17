@@ -661,6 +661,13 @@ trait EmitLlvmExpr
         $out .= "  %pl = call ptr @__manticore_cell_to_strptr(i64 %v)\n";
         $out .= "  ret ptr %pl\n";
         $out .= "}\n";
+        // The typed string boundary's i64 form, and which part of it the caller owns (a rendered
+        // scalar; 0 for the cell's own pointer): one call each per site instead of 1 + 3 lines.
+        $out .= "\ndefine i64 @__manticore_cell_to_strw(i64 %v) {\nentry:\n"
+            . "  %p = call ptr @__manticore_cell_to_strptr_s(i64 %v)\n  %r = ptrtoint ptr %p to i64\n  ret i64 %r\n}\n";
+        $out .= "\ndefine i64 @__manticore_cell_str_own(i64 %v, i64 %r) {\nentry:\n"
+            . "  %pm = and i64 %v, " . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n"
+            . "  %ne = icmp ne i64 %r, %pm\n  %o = select i1 %ne, i64 %r, i64 0\n  ret i64 %o\n}\n";
         return $out;
     }
 
@@ -7277,23 +7284,15 @@ trait EmitLlvmExpr
             // NULL and an object/array cell is untouched.
             $this->rt->needsCellToStrPtr = true;
             $this->rt->needsTaggedToStr = true;
-            $r = $this->ssa->allocReg();
-            $out = '  ' . $r . ' = call ptr @__manticore_cell_to_strptr_s(i64 '
-                 . $this->lastValue . ")\n";
-            // Hand back an i64 like the plain strip did: this helper serves
-            // every cell→string boundary, and a `return` site stores the result
-            // straight into an i64 slot without coercing.
+            // An i64 like the plain strip handed back: this helper serves every cell→string
+            // boundary, and a `return` site stores the result straight into an i64 slot.
             $ri = $this->ssa->allocReg();
-            $out .= '  ' . $ri . ' = ptrtoint ptr ' . $r . " to i64\n";
+            $out = '  ' . $ri . ' = call i64 @__manticore_cell_to_strw(i64 ' . $this->lastValue . ")\n";
             if ($this->collectCellStrOwn) {
                 // A rendered scalar is a fresh string the CALLER must free after
-                // the call; a stripped pointer is the cell's own (null = borrowed).
-                $pm = $this->ssa->allocReg();
-                $out .= '  ' . $pm . ' = and i64 ' . $this->lastValue . ', ' . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n";
-                $ne = $this->ssa->allocReg();
-                $out .= '  ' . $ne . ' = icmp ne i64 ' . $ri . ', ' . $pm . "\n";
+                // the call; a stripped pointer is the cell's own (0 = borrowed).
                 $ow = $this->ssa->allocReg();
-                $out .= '  ' . $ow . ' = select i1 ' . $ne . ', i64 ' . $ri . ", i64 0\n";
+                $out .= '  ' . $ow . ' = call i64 @__manticore_cell_str_own(i64 ' . $this->lastValue . ', i64 ' . $ri . ")\n";
                 $this->cellStrOwn = $ow;
             }
             $this->lastValue = $ri;
