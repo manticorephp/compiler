@@ -6847,26 +6847,14 @@ trait EmitLlvmExpr
 
     /**
      * A method called on a CELL that holds a tagged int / string / bool is php's Error
-     * (`Call to a member function m() on false`). One shared tag test and a cold call to
-     * {@see recvFailHelper} with the site's four messages as one constant table: built inline per
-     * site, the test, the four message literals and the raise were ~1.1 KB of IR at each of ~20k
-     * sites of a Symfony app. lastValue is left as it was.
+     * (`Call to a member function m() on false`), through {@see emitObjArgGuard}.
+     * lastValue is left as it was.
      */
     private function emitRecvGuard(string $method, string $v): string
     {
-        $head = 'Call to a member function ' . $method . '() on ';
-        $fn = $this->recvFailHelper();
-        if ($fn === '') { return $this->emitObjArgGuard($head, '', 'Error'); }
-        $this->rt->needsRecvBad = true;
-        $this->rt->needsTagged = true;
-        $tbl = $this->coerceMsgTable([$head . 'int', $head . 'string', $head . 'false', $head . 'true']);
-        $bad = $this->ssa->allocReg();
-        $fail = $this->ssa->allocLabel('recv.bad');
-        $ok = $this->ssa->allocLabel('recv.ok');
-        return '  ' . $bad . ' = call i1 @__mc_recv_bad(i64 ' . $v . ")\n"
-            . '  br i1 ' . $bad . ', label %' . $fail . ', label %' . $ok . "\n" . $fail . ":\n"
-            . '  call void ' . $fn . '(i64 ' . $v . ', ptr ' . $tbl . ")\n"
-            . "  unreachable\n" . $ok . ":\n";
+        $this->lastValue = $v;
+        $this->lastValueType = 'i64';
+        return $this->emitObjArgGuard('Call to a member function ' . $method . '() on ', '', 'Error');
     }
 
     /**
@@ -6888,23 +6876,23 @@ trait EmitLlvmExpr
     }
 
     /**
-     * The module's cold receiver-guard raise: `Error(msgs[int|string|false|true])` through the
-     * same raise helper the inline guard used, so the thrown object (file, line, trace) is the one
-     * it built. '' when Error has no raise helper.
+     * The module's cold raise of {@see emitObjArgGuard}: `$cls(msgs[int|string|false|true])` through
+     * the same raise helper the inline guard used, so the thrown object (file, line, trace) is the
+     * one it built. '' when `$cls` has no raise helper.
      */
-    private function recvFailHelper(): string
+    private function tagFailHelper(string $cls): string
     {
-        $raise = $this->raiseHelper('Error');
+        $raise = $this->raiseHelper($cls);
         if ($raise === '') { return ''; }
-        $sym = '@' . $this->mirHelperSym('__mc_recv_fail');
-        if (isset($this->dynamicMethodHelpers['recvfail'])) { return $sym; }
+        $sym = '@' . $this->mirHelperSym('__mc_tag_fail.' . $this->mangle($cls));
+        if (isset($this->dynamicMethodHelpers['tagfail:' . $cls])) { return $sym; }
         $this->rt->needsTagged = true;
         $tag = $this->rt->needsRefCells
             ? "  %t = call i64 @__manticore_tag(i64 %v)\n"
             : "  %istag = icmp ugt i64 %v, " . (string)\Compile\MemoryAbi::CELL_TAGGED_MIN . "\n"
                 . "  %sh = lshr i64 %v, 48\n  %nr = and i64 %sh, 15\n  %is5 = icmp eq i64 %nr, 5\n"
                 . "  %n = select i1 %is5, i64 1, i64 %nr\n  %t = select i1 %istag, i64 %n, i64 6\n";
-        $this->dynamicMethodHelpers['recvfail'] = 'define internal void ' . $sym . "(i64 %v, ptr %msgs) noinline cold {\nentry:\n"
+        $this->dynamicMethodHelpers['tagfail:' . $cls] = 'define internal void ' . $sym . "(i64 %v, ptr %msgs) noinline cold {\nentry:\n"
             . $tag
             . "  %isI = icmp eq i64 %t, 1\n  %isS = icmp eq i64 %t, 4\n  %bit = and i64 %v, 1\n"
             . "  %bi = add i64 %bit, 2\n  %si = select i1 %isS, i64 1, i64 %bi\n  %ix = select i1 %isI, i64 0, i64 %si\n"
@@ -6960,8 +6948,27 @@ trait EmitLlvmExpr
      * A CELL word reaching a class-typed param that is tagged int / bool / string is php's TypeError
      * (`false given`): without it the unbox masked the tag off and the callee read a null object.
      * Only TAGGED words are judged — an untagged word may be a raw object pointer the claim never boxed.
+     * One shared tag test and a cold call to {@see tagFailHelper} with the four messages as a
+     * constant table: inline, the test, the literals and the raise were ~1.1 KB of IR per site.
      */
     private function emitObjArgGuard(string $head, string $given = ' given', string $cls = 'TypeError'): string
+    {
+        $fn = $this->tagFailHelper($cls);
+        if ($fn === '') { return $this->emitObjArgGuardInline($head, $given, $cls); }
+        $v = $this->lastValue;
+        $this->rt->needsRecvBad = true;
+        $this->rt->needsTagged = true;
+        $tbl = $this->coerceMsgTable([$head . 'int' . $given, $head . 'string' . $given, $head . 'false' . $given, $head . 'true' . $given]);
+        $bad = $this->ssa->allocReg();
+        $fail = $this->ssa->allocLabel('tag.bad');
+        $ok = $this->ssa->allocLabel('tag.ok');
+        return '  ' . $bad . ' = call i1 @__mc_recv_bad(i64 ' . $v . ")\n"
+            . '  br i1 ' . $bad . ', label %' . $fail . ', label %' . $ok . "\n" . $fail . ":\n"
+            . '  call void ' . $fn . '(i64 ' . $v . ', ptr ' . $tbl . ")\n"
+            . "  unreachable\n" . $ok . ":\n";
+    }
+
+    private function emitObjArgGuardInline(string $head, string $given, string $cls): string
     {
         $v = $this->lastValue;
         $vt = $this->lastValueType;
