@@ -6843,6 +6843,74 @@ trait EmitLlvmExpr
     private string $objArgHead = '';
 
     /**
+     * A method called on a CELL that holds a tagged int / string / bool is php's Error
+     * (`Call to a member function m() on false`). One shared tag test and a cold call to
+     * {@see recvFailHelper}: built inline per site, the test, the four message literals and the
+     * raise were ~1.1 KB of IR at each of ~20k sites of a Symfony app. lastValue is left as it was.
+     */
+    private function emitRecvGuard(string $method, string $v): string
+    {
+        $head = 'Call to a member function ' . $method . '() on ';
+        $fn = $this->recvFailHelper();
+        if ($fn === '') { return $this->emitObjArgGuard($head, '', 'Error'); }
+        $this->rt->needsRecvBad = true;
+        $this->rt->needsTagged = true;
+        $bad = $this->ssa->allocReg();
+        $fail = $this->ssa->allocLabel('recv.bad');
+        $ok = $this->ssa->allocLabel('recv.ok');
+        return '  ' . $bad . ' = call i1 @__mc_recv_bad(i64 ' . $v . ")\n"
+            . '  br i1 ' . $bad . ', label %' . $fail . ', label %' . $ok . "\n" . $fail . ":\n"
+            . '  call void ' . $fn . '(i64 ' . $v . ', ptr ' . $this->strRef($head) . ")\n"
+            . "  unreachable\n" . $ok . ":\n";
+    }
+
+    /**
+     * The module's cold receiver-guard raise: `Error($head . <int|string|true|false>)` through the
+     * same raise helper the inline guard used, so the thrown object (file, line, trace) is the one
+     * it built. '' when Error has no raise helper.
+     */
+    private function recvFailHelper(): string
+    {
+        $raise = $this->raiseHelper('Error');
+        if ($raise === '') { return ''; }
+        $key = 'recvfail';
+        $sym = '@' . $this->mirHelperSym('__mc_recv_fail');
+        if (isset($this->dynamicMethodHelpers[$key])) { return $sym; }
+        $this->rt->needsTagged = true;
+        $s = static fn (string $t): string => 'ptr ' . $t;
+        $tag = $this->rt->needsRefCells
+            ? "  %t = call i64 @__manticore_tag(i64 %v)\n"
+            : "  %istag = icmp ugt i64 %v, " . (string)\Compile\MemoryAbi::CELL_TAGGED_MIN . "\n"
+                . "  %sh = lshr i64 %v, 48\n  %nr = and i64 %sh, 15\n  %is5 = icmp eq i64 %nr, 5\n"
+                . "  %n = select i1 %is5, i64 1, i64 %nr\n  %t = select i1 %istag, i64 %n, i64 6\n";
+        $this->dynamicMethodHelpers[$key] = 'define internal void ' . $sym . "(i64 %v, ptr %head) noinline cold {\nentry:\n"
+            . $tag
+            . "  %isI = icmp eq i64 %t, 1\n  %isS = icmp eq i64 %t, 4\n  %bit = and i64 %v, 1\n  %isT = icmp eq i64 %bit, 1\n"
+            . '  %bn = select i1 %isT, ' . $s($this->litStr('true')) . ', ' . $s($this->litStr('false')) . "\n"
+            . '  %sn = select i1 %isS, ' . $s($this->litStr('string')) . ", ptr %bn\n"
+            . '  %nm = select i1 %isI, ' . $s($this->litStr('int')) . ", ptr %sn\n"
+            . "  %msg = call ptr @__mir_concat(ptr %head, ptr %nm)\n"
+            . "  %mi = ptrtoint ptr %msg to i64\n"
+            . '  call void ' . $raise . "(i64 %mi, i64 0)\n  ret void\n}\n\n";
+        return $sym;
+    }
+
+    /** {@see emitRecvGuard}'s test: the word is tagged int (or bigint), string or bool. */
+    private function recvBadRuntime(): string
+    {
+        $o = "\ndefine i1 @__mc_recv_bad(i64 %v) alwaysinline {\nentry:\n";
+        if ($this->rt->needsRefCells) {
+            $o .= "  %t = call i64 @__manticore_tag(i64 %v)\n";
+        } else {
+            $o .= "  %istag = icmp ugt i64 %v, " . (string)\Compile\MemoryAbi::CELL_TAGGED_MIN . "\n"
+                . "  %s = lshr i64 %v, 48\n  %nr = and i64 %s, 15\n  %is5 = icmp eq i64 %nr, 5\n"
+                . "  %n = select i1 %is5, i64 1, i64 %nr\n  %t = select i1 %istag, i64 %n, i64 6\n";
+        }
+        return $o . "  %i = icmp eq i64 %t, 1\n  %st = icmp eq i64 %t, 4\n  %b = icmp eq i64 %t, 2\n"
+            . "  %o = or i1 %i, %st\n  %r = or i1 %o, %b\n  ret i1 %r\n}\n";
+    }
+
+    /**
      * A CELL word reaching a class-typed param that is tagged int / bool / string is php's TypeError
      * (`false given`): without it the unbox masked the tag off and the callee read a null object.
      * Only TAGGED words are judged — an untagged word may be a raw object pointer the claim never boxed.

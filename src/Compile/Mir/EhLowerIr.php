@@ -579,6 +579,7 @@ final class EhLowerIr
             || $callee === '@__manticore_deref'
             || $callee === '@__manticore_tag'
             || $callee === '@__manticore_cell_int_bad'
+            || $callee === '@__mc_recv_bad'
             || $callee === '@__mir_obj_handle_alloc'
             || \str_starts_with($callee, '@__mc_dynf_')
             || \str_starts_with($callee, '@__mir_arena_')

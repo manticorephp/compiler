@@ -11512,8 +11512,7 @@ trait EmitLlvmObjects
         $recvWord = $thisArg;
         // A cell receiver that holds a tagged scalar (a `false|Box` result) is php's Error, not a wild dereference.
         if ($mc->object->type->kind === Type::KIND_CELL) {
-            $out .= $this->emitObjArgGuard('Call to a member function ' . $mc->method . '() on ', '', 'Error');
-            $thisArg = $this->lastValue;
+            $out .= $this->emitRecvGuard($mc->method, $thisArg);
         }
         // A `mixed`/cell receiver carries a NaN-boxed object — strip the tag to
         // the raw object pointer so both the `$this` arg and the class_id

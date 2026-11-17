@@ -57,6 +57,8 @@ public bool $needsClosureRc = false;
     public bool $needsTaggedToInt = false;
     /** `__manticore_cell_to_int_arg`: a cell handed to an `int` param/return. */
     public bool $needsCellToIntArg = false;
+    /** `__mc_recv_bad`: the scalar-tag test of a method call on a cell receiver. */
+    public bool $needsRecvBad = false;
     public bool $needsTaggedToFloat = false;
     public bool $needsTaggedCompare = false;
     public bool $needsTaggedEq = false;
