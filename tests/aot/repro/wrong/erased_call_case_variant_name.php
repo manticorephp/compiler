@@ -1,5 +1,6 @@
 <?php
 // An erased call spelled in a different case than the declaration misses the method when another class has __call.
+// issue: #712
 class Plain { public function add(int $x): string { return 'plain:' . $x; } }
 class Both {
     public function ADD(int $x): string { return 'both:' . $x; }

@@ -1,5 +1,6 @@
 <?php
 // A `@var array<string, int[]>|null` property read back through an `@return array<string, int[]>` method yields boxed cells as ints.
+// issue: #711
 final class H {
     /** @var array<string, int[]>|null */
     private ?array $ix = null;
