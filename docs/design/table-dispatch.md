@@ -475,8 +475,8 @@ Where the implementation departs from the plan above, and why:
 - **C2, trampolines (built).** A trampoline makes one call and takes omitted arguments from the
   `__mc_pdef_*` default factories reflection already synthesizes, instead of an arm per arity.
   symfony `__mc_rtramp_` 37.7 → 31.6 MB, laravel 135.0 → 117.2 MB. Arms remain where an
-  explicit default is observable or unavailable: a class whose source counts its arguments
-  (`func_get_args` and friends — detected per source file, since bodies are not lowered yet), a
+  explicit default is observable or unavailable: a method whose body counts its arguments
+  (`func_get_args` / `func_get_arg` / `func_num_args`, recorded by the parser from the body's tokens, lazy or not, as `MethodDecl::$countsArgs`, and carried to trait aliases; `get_defined_vars` / `compact` see the same values either way), a
   by-reference parameter, no factory, no reflection.
 - **C1, the descriptor + runtime binder (not built).** What remains of a trampoline after C2 is
   per-parameter coercion (an int check with its TypeError, a string render with its own

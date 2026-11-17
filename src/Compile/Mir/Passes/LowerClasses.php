@@ -1493,6 +1493,7 @@ trait LowerClasses
                 $src->params, $src->returnType, $src->body, $src->attributes, $src->span,
                 $src->returnsByRef, $src->docComment,
                 $src->lazyBody === null ? null : clone $src->lazyBody,
+                0, $src->countsArgs,
             );
         }
         $isTypeDefDecl = $this->isTypeDef($decl->name);

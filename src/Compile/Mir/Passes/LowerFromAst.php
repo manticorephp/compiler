@@ -1435,34 +1435,41 @@ final class LowerFromAst implements Pass
                 $defaultFactories[$decl->name] = true;
             }
             // A callee that counts its arguments must see the count it was called
-            // with, which only an arm per arity passes: keep arms for every class
-            // whose source (or a used trait's) mentions func_get_arg(s)/func_num_args.
-            // The bodies are not lowered yet, so this reads the files; a class with
-            // no file (the prelude blob) counts as one that might.
-            /** @var array<string, bool> $fileCounts */
-            $fileCounts = [];
-            $funcArgsClasses = [];
+            // with, which only an arm per arity passes. The parser records it per
+            // method (MethodDecl::$countsArgs, from the body's tokens, lazy or not);
+            // a trait method counts for the class it is mixed into, under its own
+            // name and every alias.
+            $countsArgs = [];
             foreach ($module->classes as $cd) {
                 $cdecl = $this->classDecls[$cd->name] ?? null;
                 if ($cdecl === null) { continue; }
-                $files = [$cdecl->span->file];
+                $lc = \strtolower(\ltrim($cd->name, '\\'));
+                foreach ($cdecl->methods as $cm) {
+                    if ($cm->countsArgs) { $countsArgs[$lc . '::' . \strtolower($cm->name)] = true; }
+                }
                 foreach ($this->usedTraitsFlat($cdecl) as $tn) {
                     $tdecl = $this->traitTable[\ltrim($tn, '\\')] ?? null;
-                    if ($tdecl !== null) { $files[] = $tdecl->span->file; }
-                }
-                foreach ($files as $file) {
-                    if (!isset($fileCounts[$file])) {
-                        $src = 'func_get_args';
-                        if ($file !== '') {
-                            try { $src = (string)\file_get_contents($file); } catch (\Throwable $e) { $src = 'func_get_args'; }
-                        }
-                        $fileCounts[$file] = \str_contains($src, 'func_get_arg') || \str_contains($src, 'func_num_args');
+                    if ($tdecl === null) { continue; }
+                    foreach ($tdecl->methods as $tm) {
+                        if ($tm->countsArgs) { $countsArgs[$lc . '::' . \strtolower($tm->name)] = true; }
                     }
-                    if ($fileCounts[$file]) { $funcArgsClasses[\strtolower($cd->name)] = true; break; }
+                }
+                foreach ($this->effectiveAdaptations($cdecl) as $ad) {
+                    if ($ad->alias === '') { continue; }
+                    $from = $ad->trait !== '' ? [$ad->trait] : $this->usedTraitsFlat($cdecl);
+                    foreach ($from as $tn) {
+                        $tdecl = $this->traitTable[\ltrim($tn, '\\')] ?? null;
+                        if ($tdecl === null) { continue; }
+                        foreach ($tdecl->methods as $tm) {
+                            if ($tm->countsArgs && \strcasecmp($tm->name, $ad->method) === 0) {
+                                $countsArgs[$lc . '::' . \strtolower($ad->alias)] = true;
+                            }
+                        }
+                    }
                 }
             }
             \Compile\Mir\Passes\TrampolineSynth::$defaultFactories = $defaultFactories;
-            \Compile\Mir\Passes\TrampolineSynth::$funcArgsClasses = $funcArgsClasses;
+            \Compile\Mir\Passes\TrampolineSynth::$countsArgs = $countsArgs;
             $trampSrc = '';
             foreach ($module->classes as $cd) {
                 $trampSrc .= \Compile\Mir\Passes\TrampolineSynth::sourceFor($cd);

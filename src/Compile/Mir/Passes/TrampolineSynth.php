@@ -50,8 +50,8 @@ final class TrampolineSynth
 
     /** @var array<string, bool> names of the synthesized parameter-default factories (`__mc_pdef_*`) */
     public static array $defaultFactories = [];
-    /** @var array<string, bool> lower-cased classes whose source (or a used trait's) counts its arguments */
-    public static array $funcArgsClasses = [];
+    /** @var array<string, bool> lower-cased `class::method` whose body counts its arguments ({@see \Parser\Ast\MethodDecl::$countsArgs}) */
+    public static array $countsArgs = [];
 
     /** The symbol suffix of a constructor's instance-style trampoline ({@see sourceFor}). */
     public const CTOR_CALL = '__construct_call';
@@ -451,14 +451,14 @@ final class TrampolineSynth
     /**
      * The default factories a single-call trampoline for `$declClass::$method` may use for its
      * optional parameters, or null when it must keep its per-arity arms: a by-reference parameter
-     * (a ternary hands it a temporary, not the element), a class that counts its arguments
+     * (a ternary hands it a temporary, not the element), a method that counts its arguments
      * (`func_get_args`), or a default without a synthesized factory.
      *
      * @return string[]|null
      */
     private static function singleCallDefaults(string $declClass, string $method, MethodMeta $mm): ?array
     {
-        if (isset(self::$funcArgsClasses[\strtolower(\ltrim($declClass, '\\'))])) { return null; }
+        if (isset(self::$countsArgs[\strtolower(\ltrim($declClass, '\\') . '::' . $method)])) { return null; }
         $req = $mm->requiredParams();
         $out = [];
         foreach ($mm->params as $pi => $p) {

@@ -1200,6 +1200,7 @@ final class Parser
             $returnType = $this->parseTypeHint();
         }
 
+        $bodyFrom = $this->pos;
         $body = null;
         $lazyBody = null;
         if ($this->check(TokenKind::OpenBrace)) {
@@ -1226,7 +1227,31 @@ final class Parser
             $docComment,
             $lazyBody,
             $this->pos > 0 ? $this->tokens[$this->pos - 1]->line : 0,
+            $this->tokensCountArgs($bodyFrom, $this->pos),
         );
+    }
+
+    /**
+     * Whether tokens [$from, $to) — a method body, parsed or skipped lazily — call
+     * func_get_args() / func_get_arg() / func_num_args(): the calls that observe how many
+     * arguments the method was given (not a method or static call of that name, not a function
+     * declared with it). A closure inside the body counts too: it is one reading of the same
+     * tokens, and keeping the method on the conservative side costs only an arm per arity.
+     */
+    private function tokensCountArgs(int $from, int $to): bool
+    {
+        for ($i = $from; $i < $to; $i = $i + 1) {
+            $tok = $this->tokens[$i];
+            if ($tok->kind !== TokenKind::Identifier) { continue; }
+            $lex = \strtolower(\ltrim($tok->lexeme, '\\'));
+            if ($lex !== 'func_get_args' && $lex !== 'func_get_arg' && $lex !== 'func_num_args') { continue; }
+            $next = $this->tokens[$i + 1] ?? null;
+            if ($next === null || $next->kind !== TokenKind::OpenParen) { continue; }
+            $prev = $i > 0 ? $this->tokens[$i - 1]->lexeme : '';
+            if ($prev === '->' || $prev === '?->' || $prev === '::' || \strtolower($prev) === 'function') { continue; }
+            return true;
+        }
+        return false;
     }
 
     /** @param AttributeNode[] $attrs */
