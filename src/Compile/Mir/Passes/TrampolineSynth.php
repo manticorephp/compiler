@@ -339,6 +339,21 @@ final class TrampolineSynth
             . "      . (\$scope === '' ? 'global scope' : 'scope ' . \$scope));\n"
             . "}\n";
     }
+
+    /** The one function every trampoline's arity guard calls. */
+    public const TOO_FEW = '__mc_tramp_too_few';
+
+    /**
+     * php's ArgumentCountError for a trampoline handed fewer arguments than the method requires —
+     * one shared body: built inline, the error object and its message were ~75 IR lines in every
+     * trampoline with a required parameter (a fifth of all trampoline IR on a Symfony app).
+     */
+    public static function tooFewSource(): string
+    {
+        return 'function ' . self::TOO_FEW . "(int \$n, int \$req): void {\n"
+            . "  throw new \\ArgumentCountError('Too few arguments: ' . \$n . ' passed and at least ' . \$req . ' expected');\n}\n";
+    }
+
     /** `new \\C(args)` — recv ignored. Arms from the ctor's required..total. */
     private static function ctorTramp(string $class, ?MethodMeta $ctor): string
     {
@@ -382,7 +397,7 @@ final class TrampolineSynth
     /**
      * One arm per legal arity R..T, each a literal-arity call so lowering fills
      * that arm's defaults. `$mk(argsExpr)` builds the call expression from a
-     * comma list `$a[0], $a[1], …`. A void call returns null (an undefined i64
+            ? '  if (count($a) < ' . (string)$req . ') { \\' . self::TOO_FEW . '(count($a), ' . (string)$req . "); }\n"
      * result otherwise). When R==T there is a single tail call, no count().
      */
     private static function arms(int $req, int $tot, callable $mk, bool $void): string
@@ -396,7 +411,7 @@ final class TrampolineSynth
             return \implode(', ', $parts);
         };
         $guard = $req > 0
-            ? '  if (count($a) < ' . (string)$req . ") { throw new \\ArgumentCountError('Too few arguments: ' . count(\$a) . ' passed and at least " . (string)$req . " expected'); }\n"
+            ? '  if (count($a) < ' . (string)$req . ") { \\__mc_tramp_too_few(count(\$a), " . (string)$req . "); }\n"
             : '';
         if ($req >= $tot) {
             return $guard . $stmt($mk($argsUpTo($tot)));

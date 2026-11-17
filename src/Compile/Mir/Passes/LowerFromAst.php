@@ -335,6 +335,8 @@ final class LowerFromAst implements Pass
     /** The program calls `function_exists()` with a NON-literal argument, so it
      *  needs the runtime name table rather than the compile-time fold. */
     private bool $sawDynFnExists = false;
+    /** The module {@see lowerTrampTooFew} last lowered the shared arity error into. */
+    private ?Module $trampTooFewFor = null;
     /** A `get_defined_functions()` call was lowered ({@see definedFunctionsSource}). */
     private bool $sawGetDefinedFns = false;
     /** @var array<string, bool> lowercased method names any `[$x, 'name']` literal spells, static receiver included */
@@ -1428,6 +1430,7 @@ final class LowerFromAst implements Pass
                 $trampSrc .= \Compile\Mir\Passes\ReflectSynth::sourceFor($cd);
             }
             if ($trampSrc !== '') {
+                $this->lowerTrampTooFew($module);
                 $trampProg = \Parser\Parser::parseSource("<?php\n" . $trampSrc);
                 foreach ($trampProg->statements as $tstmt) {
                     if ($tstmt->kind !== 'Function') { continue; }
@@ -1748,6 +1751,7 @@ final class LowerFromAst implements Pass
                     $fn, $mm->requiredParams(), \count($mm->params), $void, $variadic);
             }
             if ($fnTrampSrc !== '') {
+                $this->lowerTrampTooFew($module);
                 $prog = \Parser\Parser::parseSource("<?php\n" . $fnTrampSrc);
                 foreach ($prog->statements as $s) {
                     if ($s->kind !== 'Function') { continue; }
@@ -1867,6 +1871,7 @@ final class LowerFromAst implements Pass
                     $dynamicTrampSrc .= \Compile\Mir\Passes\TrampolineSynth::sourceFor($cd);
                 }
                 if ($dynamicTrampSrc !== '') {
+                    $this->lowerTrampTooFew($module);
                     $dynamicTrampProg = \Parser\Parser::parseSource("<?php\n" . $dynamicTrampSrc);
                     foreach ($dynamicTrampProg->statements as $dstmt) {
                         if ($dstmt->kind !== 'Function') { continue; }
@@ -2731,6 +2736,25 @@ final class LowerFromAst implements Pass
             $out[] = new \Parser\Ast\FunctionDecl(
                 \Compile\Mir\Passes\ReflectSynth::attrFn($class, $kind, $member, $k, true),
                 [], 'mixed', $newBody, $span);
+        }
+    }
+
+    /**
+     * Lower {@see TrampolineSynth::tooFewSource} into `$module` once, as a coalescing prelude-style
+     * body: every trampoline's arity guard calls it, and a library and an application that both
+     * carry trampolines must not each define it strongly.
+     */
+    private function lowerTrampTooFew(Module $module): void
+    {
+        if ($this->trampTooFewFor === $module) { return; }
+        $this->trampTooFewFor = $module;
+        $prog = \Parser\Parser::parseSource("<?php\n" . \Compile\Mir\Passes\TrampolineSynth::tooFewSource());
+        foreach ($prog->statements as $s) {
+            if ($s->kind !== 'Function') { continue; }
+            $this->declareFn($s->decl->name, $s->decl);
+            $fn = $this->lowerFunction($s->decl);
+            $fn->isPrelude = true;
+            $module->addFunction($fn);
         }
     }
 
