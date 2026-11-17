@@ -1288,4 +1288,14 @@ final class MemoryAbi
     public const SPREAD_BIND_KIND_STRING = 5;
     public const SPREAD_BIND_KIND_CALLABLE = 6;
     public const SPREAD_BIND_KIND_PTR = 7;
+
+    /**
+     * Trampoline-bind descriptor ({@see \Compile\Mir\Passes\EmitLlvmCalls::trampBindHelper}):
+     * `[N x i64]`, the argument count, then {@see TRAMP_BIND_SLOT_WORDS} words per argument:
+     * `{ info, __mc_pdef_* factory pointer or 0, trace-site name pointer or 0 }`.
+     */
+    public const TRAMP_BIND_SLOT_WORDS = 3;
+    public const TRAMP_BIND_OPTIONAL = 1;  // the pack may lack it: the factory supplies it, a present one is retained
+    public const TRAMP_BIND_DECODE = 2;    // decode the element by its buffer's hint
+    public const TRAMP_BIND_DEREF = 4;     // see through a reference element
 }

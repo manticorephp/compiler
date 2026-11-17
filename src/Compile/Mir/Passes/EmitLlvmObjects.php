@@ -843,6 +843,7 @@ trait EmitLlvmObjects
             $mask = $this->sigs->refParams[$ctorClass . '____construct'] ?? [];
             $spreadPack = '';
             $ai = 0;
+            $out .= $this->trampBindPrepare($n->args, $mask, 1, $ptypes, true, $ctorClass . '____construct');
             foreach ($n->args as $a) {
                 // `new C(...$arr)`: expand the pack across the ctor's remaining
                 // params (param 0 is `$this`). Without an arm here the Spread_
@@ -8873,6 +8874,7 @@ trait EmitLlvmObjects
         $ai = 0;
         $refSlotDrops = '';
         $spreadPack = '';
+        $out .= $this->trampBindPrepare($this->faCallArgs($target, $n->args), $mask, 0, $ptypes, true, $cls . '__' . $n->method);
         foreach ($this->faCallArgs($target, $n->args) as $a) {
             // `Cls::m(...$arr)`: expand across the method's declared params
             // (a static call has no implicit `$this`, so arg `ai` is param `ai`).
@@ -8978,6 +8980,8 @@ trait EmitLlvmObjects
             }
             $ai = $ai + 1;
         }
+        $this->trampArgNodes = [];
+        $this->trampArgRegs = [];
         $out .= $this->surplusArgEffects($target, $n->args);
         // Catch-all default pad (mirrors emitMethodCall); a static call is
         // usually lower-filled, but an unresolved-at-lowering callee may
@@ -11754,6 +11758,13 @@ trait EmitLlvmObjects
             }
             for ($q = \count($ptypes); $q <= \count($mc->args); $q = $q + 1) { $ptypes[$q] = Type::cell(); }
         }
+        if (!$unboundPack && $widenRef === [] && $widenCell === [] && $this->frame->isTrampoline) {
+            $boxes = false;
+            foreach ($siteArgs as $j => $sa) {
+                if ($this->cellArrayParamNeedsBoxing($ptypes[$j + 1] ?? null, $sa->type)) { $boxes = true; }
+            }
+            if (!$boxes) { $out .= $this->trampBindPrepare($siteArgs, $mask, 1, $ptypes, false, $fallback . '__' . $mc->method); }
+        }
         $ai = 0;
         foreach ($siteArgs as $a) {
             // `$obj->m(...$arr)`: expand across the method's declared params
@@ -11913,6 +11924,8 @@ trait EmitLlvmObjects
             }
             $ai = $ai + 1;
         }
+        $this->trampArgNodes = [];
+        $this->trampArgRegs = [];
         if (!$unboundPack) { $out .= $this->surplusArgEffects($fallback . '__' . $mc->method, $mc->args, $fbStatic ? 0 : 1); }
         // Pad omitted trailing optionals: a typed-receiver call (`$x->m()`)
         // isn't default-filled at lowering (class unknown pre-InferTypes),

@@ -6247,6 +6247,224 @@ trait EmitLlvmCalls
         return $sym;
     }
 
+    /**
+     * Argument nodes of the trampoline call being emitted whose words {@see trampBindPrepare}
+     * already produced, and those words: {@see emitNode} answers such a node with its word.
+     * Unlike {@see $preEvalNodes} they keep their ownership — an optional argument's word is
+     * owned exactly as the ternary it stands for.
+     * @var Node[]
+     */
+    private array $trampArgNodes = [];
+    /** @var string[] */
+    private array $trampArgRegs = [];
+
+    private function trampArgIndex(Node $n): int
+    {
+        foreach ($this->trampArgNodes as $i => $p) {
+            if ($p === $n) { return $i; }
+        }
+        return -1;
+    }
+
+    /**
+     * A trampoline's call arguments decoded from its pack by the module's table-driven binder
+     * ({@see trampBindHelper}) instead of one inline read per argument and one ternary per
+     * optional one. Matches only the shape {@see TrampolineSynth::arms} writes — argument `j` is
+     * `$a[j]`, or `$n > j ? $a[j] : \__mc_pdef_…()`, either maybe under the TypeCheck `Cast` —
+     * bound by value. The binder runs all reads and factory calls where the first argument was
+     * read, so a call where an argument that may throw while it is coerced (a `Cast`, or with
+     * `$siteCoerces` any typed parameter) comes before an optional one keeps the inline form:
+     * the factory would run before that throw — unless the callee's default is a constant
+     * literal, whose factory has no effect either. Reads have none. Used only where it pays:
+     * an optional argument, or enough required ones to outweigh the call.
+     * Returns the binder IR (the words land in {@see $trampArgNodes}), or ''.
+     * @param Node[] $args
+     * @param array<int,bool> $mask by-ref mask, parameter index `$off + j`
+     * @param Type[] $ptypes parameter types, index `$off + j`
+     */
+    private function trampBindPrepare(array $args, array $mask, int $off, array $ptypes, bool $siteCoerces, string $fnKey): string
+    {
+        $this->trampArgNodes = [];
+        $this->trampArgRegs = [];
+        // -O0 only: optimized, a bound trampoline with an omitted optional argument ran 25-30 % slower
+        // called and 20-27 % inlined (the descriptor loop does not fold away); the inline reads do.
+        if (\Manticore\CompileArgs::$optLevel !== '0') { return ''; }
+        if (!$this->frame->isTrampoline || $args === [] || \count($args) > 62) { return ''; }
+        $slots = [];
+        $read0 = null;
+        /** @var Node[] $hooked */
+        $hooked = [];
+        $coerced = false;
+        $anyOpt = false;
+        foreach ($args as $j => $arg) {
+            if ($mask[$off + $j] ?? false) { return ''; }
+            $a = $arg;
+            $cast = $arg instanceof \Compile\Mir\Cast;
+            if ($arg instanceof \Compile\Mir\Cast) { $a = $arg->operand; }
+            if ($a->type->kind !== Type::KIND_CELL) { return ''; }
+            $read = $a;
+            $fn = '';
+            if ($a instanceof \Compile\Mir\Ternary) {
+                $c = $a->cond;
+                $e = $a->else_;
+                if ($a->then === null || !($c instanceof \Compile\Mir\Cmp) || $c->op !== '>'
+                    || !($c->right instanceof \Compile\Mir\IntConst) || $c->right->value !== $j
+                    || !($c->left instanceof \Compile\Mir\LoadLocal) || $c->left->name !== 'n'
+                    || !($e instanceof Call) || $e->args !== [] || !\str_starts_with($e->function, '__mc_pdef_')
+                    || $a->then->type->kind !== Type::KIND_CELL) { return ''; }
+                $read = $a->then;
+                $fn = $e->function;
+                if ($coerced && !$this->isPureDefaultNode($this->sigs->paramDefaults[$fnKey][$off + $j] ?? null)) { return ''; }
+                $anyOpt = true;
+            }
+            $pt = $ptypes[$off + $j] ?? null;
+            if ($cast || ($siteCoerces && $pt !== null && $pt->kind !== Type::KIND_CELL && $pt->kind !== Type::KIND_UNKNOWN)) {
+                $coerced = true;
+            }
+            $hooked[] = $a;
+            if (!($read instanceof ArrayAccess_) || !($read->index instanceof \Compile\Mir\IntConst)
+                || $read->index->value !== $j || !($read->array instanceof \Compile\Mir\LoadLocal)
+                || $read->array->name !== 'a' || $read->type->kind !== Type::KIND_CELL) { return ''; }
+            $at = $read->array->type;
+            $info = 0;
+            if ($fn !== '') { $info = $info | \Compile\MemoryAbi::TRAMP_BIND_OPTIONAL; }
+            if ($this->elemMayBeRawHinted($at)) { $info = $info | \Compile\MemoryAbi::TRAMP_BIND_DECODE; }
+            if ($this->rt->needsRefCells && $this->elemSlotMayHoldRef($at)) {
+                $this->rt->needsTagged = true;
+                $info = $info | \Compile\MemoryAbi::TRAMP_BIND_DEREF;
+            }
+            $site = 'i64 0';
+            $fp = 'i64 0';
+            if ($fn !== '') {
+                $fp = 'i64 ptrtoint (ptr @manticore_' . $this->mangle($fn) . ' to i64)';
+                $bs = \strrpos($fn, '\\');
+                $push = $this->btPush($bs === false ? $fn : \substr($fn, $bs + 1), 0);
+                if ($push !== '') {
+                    if (\preg_match('/^  call void @__mir_bt_push_site\(ptr ([^\n]+)\)\n$/', $push, $mm) !== 1) { return ''; }
+                    $site = 'i64 ptrtoint (ptr ' . $mm[1] . ' to i64)';
+                }
+            }
+            $slots[] = 'i64 ' . (string)$info;
+            $slots[] = $fp;
+            $slots[] = $site;
+            if ($read0 === null) { $read0 = $read; }
+        }
+        // A required read is three calls inline; the bound form costs a call, its check and a load each.
+        if (!$anyOpt && \count($args) < 8) { return ''; }
+        $fn = $this->trampBindHelper();
+        $words = ['i64 ' . (string)\count($args)];
+        foreach ($slots as $w) { $words[] = $w; }
+        $init = '[' . (string)\count($words) . ' x i64] [' . \implode(', ', $words) . ']';
+        $desc = $this->litTableSym('@.tpb.', $init);
+        if ($desc[1]) {
+            $this->litTableBodies .= $desc[0] . ' = private unnamed_addr constant ' . $init . ", align 8\n";
+        }
+        if (!($read0 instanceof ArrayAccess_)) { return ''; }
+        $out = $this->emitNode($read0->array);
+        $out .= $this->arrayBaseToPtr($read0->array->type);
+        $arr = $this->lastValue;
+        $buf = $this->ssa->allocReg();
+        $out .= '  ' . $buf . ' = alloca [' . (string)\count($args) . " x i64]\n";
+        $out .= '  call void ' . $fn . '(ptr ' . $arr . ', ptr ' . $desc[0] . ', ptr ' . $buf . ")\n";
+        foreach ($hooked as $j => $a) {
+            $gp = $this->ssa->allocReg();
+            $v = $this->ssa->allocReg();
+            $out .= '  ' . $gp . ' = getelementptr inbounds i64, ptr ' . $buf . ', i64 ' . (string)$j . "\n";
+            $out .= '  ' . $v . ' = load i64, ptr ' . $gp . "\n";
+            $this->markCellOpaque($v);
+            $this->trampArgNodes[] = $a;
+            $this->trampArgRegs[] = $v;
+        }
+        return $out;
+    }
+
+    /** A default whose evaluation has no effect: a scalar literal or an array literal of them. */
+    private function isPureDefaultNode(?Node $n): bool
+    {
+        if ($n === null) { return false; }
+        if ($n instanceof ArrayLit) {
+            foreach ($n->elements as $e) {
+                if (!($e instanceof \Compile\Mir\ArrayElement_)) { return false; }
+                if ($e->key !== null && !$this->isPureDefaultNode($e->key)) { return false; }
+                if (!$this->isPureDefaultNode($e->value)) { return false; }
+            }
+            return true;
+        }
+        $k = $n->kind;
+        return $k === Node::KIND_INT_CONST || $k === Node::KIND_FLOAT_CONST || $k === Node::KIND_STRING_CONST
+            || $k === Node::KIND_BOOL_CONST || $k === Node::KIND_NULL_CONST;
+    }
+
+    /**
+     * `void (ptr pack, ptr desc, ptr out)`, once per module: a trampoline's arguments read from
+     * its pack as {@see trampBindPrepare}'s descriptor lists them, in order — element `j` by
+     * int key (decoded by the buffer's hint, a reference seen through, as the `$a[j]` read
+     * does), and for an optional one the pack lacks the parameter's `__mc_pdef_*` factory
+     * value under its trace frame; a present optional element is retained, as the ternary's
+     * borrowed arm is. Module-internal, like the spread binder.
+     */
+    private function trampBindHelper(): string
+    {
+        $sym = '@' . $this->mirHelperSym('__mc_tbind');
+        if (isset($this->dynamicMethodHelpers['tbind'])) { return $sym; }
+        $sw = (string)\Compile\MemoryAbi::TRAMP_BIND_SLOT_WORDS;
+        $this->dynamicMethodHelpers['tbind'] = 'define internal void ' . $sym . "(ptr %arr, ptr %d, ptr %out) {\nentry:\n"
+            . "  %n = load i64, ptr %d\n"
+            . "  %isnull = icmp eq ptr %arr, null\n"
+            . "  %safe = select i1 %isnull, ptr @__mir_zero_word, ptr %arr\n"
+            . "  %phys = load i64, ptr %safe\n"
+            . '  %fwp = getelementptr inbounds i8, ptr %safe, i64 ' . (string)\Compile\MemoryAbi::ARRAY_FLAGS_OFFSET . "\n"
+            . "  %fw = load i64, ptr %fwp\n"
+            . '  %tsh = lshr i64 %fw, ' . (string)\Compile\MemoryAbi::ARRAY_TOMB_SHIFT . "\n"
+            . '  %tm0 = and i64 %tsh, ' . (string)\Compile\MemoryAbi::ARRAY_TOMB_VALUE_MASK . "\n"
+            . "  %tm = select i1 %isnull, i64 0, i64 %tm0\n"
+            . "  %cnt = sub i64 %phys, %tm\n"
+            . "  br label %head\n"
+            . "head:\n"
+            . "  %j = phi i64 [ 0, %entry ], [ %j1, %next ]\n"
+            . "  %more = icmp ult i64 %j, %n\n"
+            . "  br i1 %more, label %body, label %done\n"
+            . "body:\n"
+            . '  %ix0 = mul i64 %j, ' . $sw . "\n"
+            . "  %ix = add i64 %ix0, 1\n"
+            . "  %ip = getelementptr inbounds i64, ptr %d, i64 %ix\n"
+            . "  %info = load i64, ptr %ip\n"
+            . "  %op = getelementptr inbounds i64, ptr %out, i64 %j\n"
+            . '  %of = and i64 %info, ' . (string)\Compile\MemoryAbi::TRAMP_BIND_OPTIONAL . "\n"
+            . "  %isopt = icmp ne i64 %of, 0\n"
+            . "  %present = icmp sgt i64 %cnt, %j\n"
+            . "  %absent = xor i1 %present, true\n"
+            . "  %usedef = and i1 %isopt, %absent\n"
+            . "  br i1 %usedef, label %def, label %read\n"
+            . "def:\n"
+            . "  %fpp = getelementptr inbounds i64, ptr %ip, i64 1\n  %fpw = load i64, ptr %fpp\n  %fp = inttoptr i64 %fpw to ptr\n"
+            . ($this->rt->needsBacktrace
+                // The trace frame the factory call had ({@see btPush}); a module that queries no
+                // trace pushes none and its descriptors carry no site.
+                ? "  %stp = getelementptr inbounds i64, ptr %ip, i64 2\n  %stw = load i64, ptr %stp\n"
+                    . "  %hasst = icmp ne i64 %stw, 0\n  br i1 %hasst, label %push, label %call\n"
+                    . "push:\n  %st = inttoptr i64 %stw to ptr\n  call void @__mir_bt_push_site(ptr %st)\n  br label %call\n"
+                    . "call:\n  %dv = call i64 %fp()\n  br i1 %hasst, label %pop, label %defst\n"
+                    . "pop:\n  call void @__mir_bt_pop()\n  br label %defst\n"
+                : "  %dv = call i64 %fp()\n  br label %defst\n")
+            . "defst:\n  store i64 %dv, ptr %op\n  br label %next\n"
+            . "read:\n"
+            . "  %w0 = call i64 @__mir_array_get_int(ptr %arr, i64 %j)\n"
+            . '  %df = and i64 %info, ' . (string)\Compile\MemoryAbi::TRAMP_BIND_DECODE . "\n"
+            . "  %isdec = icmp ne i64 %df, 0\n  br i1 %isdec, label %dec, label %rf\n"
+            . "dec:\n  %w1 = call i64 @__mir_elem_decode(ptr %arr, i64 %w0)\n  br label %rf\n"
+            . "rf:\n  %w2 = phi i64 [ %w0, %read ], [ %w1, %dec ]\n"
+            . '  %rff = and i64 %info, ' . (string)\Compile\MemoryAbi::TRAMP_BIND_DEREF . "\n"
+            . "  %isrf = icmp ne i64 %rff, 0\n  br i1 %isrf, label %drf, label %own\n"
+            . "drf:\n  %w3 = call i64 @__manticore_deref(i64 %w2)\n  br label %own\n"
+            . "own:\n  %w = phi i64 [ %w2, %rf ], [ %w3, %drf ]\n  br i1 %isopt, label %ret, label %rdst\n"
+            . "ret:\n  call void @__mir_cell_retain(i64 %w)\n  br label %rdst\n"
+            . "rdst:\n  store i64 %w, ptr %op\n  br label %next\n"
+            . "next:\n  %j1 = add i64 %j, 1\n  br label %head\n"
+            . "done:\n  ret void\n}\n\n";
+        return $sym;
+    }
+
     /** Only a vec of a concrete element is certainly a list; a cell/erased vec may carry string keys. */
     private function spreadMayBeKeyed(?Type $t): bool
     {
@@ -7130,6 +7348,7 @@ trait EmitLlvmCalls
         // them and the emitted call would not match its `declare`.
         $spreadPack = '';
         $callArgs = $this->faCallArgs($c->function, $c->args);
+        $out .= $this->trampBindPrepare($callArgs, $mask, 0, $ptypes, true, $c->function);
         foreach ($callArgs as $a) {
             // Argument unpacking `f(...$arr)`: expand the array into the callee's
             // remaining positional params (arr[0], arr[1], …). Fixed-arity; the
