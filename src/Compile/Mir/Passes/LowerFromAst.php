@@ -2735,9 +2735,13 @@ final class LowerFromAst implements Pass
     }
 
     /**
-     * One `__mc_cdoc_<C>(): mixed` per class: `['c' => [doc, line], 'm' => [lower-cased
-     * method => [doc, line]], 'p' => [property => [doc]]]`, `doc` being the raw
-     * docblock or false. What `getDocComment()` / `getStartLine()` read.
+     * One `__mc_cdoc_<C>(): mixed` per class: `['u' => [trait, …], 'r' => readonly, 'c' => [doc, line, end],
+     * 'm' => [lower-cased method => [doc, line, end]], 'p' => [property => [doc, line, end]]]`, `doc`
+     * being the raw docblock or false. What `getDocComment()` / `getStartLine()` read.
+     *
+     * The value is constant data, so the body is not code that builds it: it is one serialized
+     * string literal decoded by the generic native decoder (`__mc_unser_native`). Built element by
+     * element it was ~15 KB of IR a class (57 MB on Laravel).
      *
      * @return \Parser\Ast\FunctionDecl[]
      */
@@ -2749,40 +2753,33 @@ final class LowerFromAst implements Pass
             if (!isset($this->classDecls[$cd->name])) { continue; }
             $decl = $this->classDecls[$cd->name];
             $sp = new \Parser\Ast\Span(0, 0);
-            $methods = [];
+            $methods = '';
+            $nm = 0;
             foreach ($decl->methods as $md) {
-                $methods[] = new \Parser\Ast\ArrayElement(
-                    \Parser\Ast\Expr::string(\strtolower($md->name), $sp),
-                    $this->docEntry($md->docComment, $md->span->line, $sp, $md->endLine));
+                $methods .= self::serStr(\strtolower($md->name)) . self::serDoc($md->docComment, $md->span->line, $md->endLine);
+                $nm = $nm + 1;
             }
-            $props = [];
+            $props = '';
+            $np = 0;
             foreach ($decl->properties as $pd) {
-                $props[] = new \Parser\Ast\ArrayElement(
-                    \Parser\Ast\Expr::string($pd->name, $sp),
-                    $this->docEntry($pd->docComment, $pd->span->line, $sp));
+                $props .= self::serStr($pd->name) . self::serDoc($pd->docComment, $pd->span->line);
+                $np = $np + 1;
             }
-            $traitElems = [];
+            $traits = '';
             $traitNames = [];
             foreach ($decl->uses as $tn) {
                 $tn = \ltrim($tn, '\\');
-                $traitElems[] = new \Parser\Ast\ArrayElement(null, \Parser\Ast\Expr::string($tn, $sp));
+                $traits .= 'i:' . (string)\count($traitNames) . ';' . self::serStr($tn);
                 $traitNames[] = $tn;
             }
             $module->classTraitNames[$cd->name] = $traitNames;
-            $elems = [
-                new \Parser\Ast\ArrayElement(\Parser\Ast\Expr::string('u', $sp),
-                    \Parser\Ast\Expr::arrayLit($traitElems, $sp)),
-                new \Parser\Ast\ArrayElement(\Parser\Ast\Expr::string('r', $sp),
-                    \Parser\Ast\Expr::bool($decl->isReadonly, $sp)),
-                new \Parser\Ast\ArrayElement(\Parser\Ast\Expr::string('c', $sp),
-                    $this->docEntry($decl->docComment, $decl->span->line, $sp)),
-                new \Parser\Ast\ArrayElement(\Parser\Ast\Expr::string('m', $sp),
-                    \Parser\Ast\Expr::arrayLit($methods, $sp)),
-                new \Parser\Ast\ArrayElement(\Parser\Ast\Expr::string('p', $sp),
-                    \Parser\Ast\Expr::arrayLit($props, $sp)),
-            ];
+            $blob = 'a:5:{' . self::serStr('u') . 'a:' . (string)\count($traitNames) . ':{' . $traits . '}'
+                . self::serStr('r') . 'b:' . ($decl->isReadonly ? '1' : '0') . ';'
+                . self::serStr('c') . self::serDoc($decl->docComment, $decl->span->line)
+                . self::serStr('m') . 'a:' . (string)$nm . ':{' . $methods . '}'
+                . self::serStr('p') . 'a:' . (string)$np . ':{' . $props . '}}';
             $body = new \Parser\Ast\Block([
-                \Parser\Ast\Stmt::return_(\Parser\Ast\Expr::arrayLit($elems, $sp), $sp),
+                \Parser\Ast\Stmt::return_(\Parser\Ast\Expr::call('__mc_unser_native', [\Parser\Ast\Expr::string($blob, $sp)], $sp), $sp),
             ]);
             $out[] = new \Parser\Ast\FunctionDecl(
                 \Compile\Mir\Passes\ReflectSynth::docFn($cd->name), [], 'mixed', $body, $sp);
@@ -2790,15 +2787,17 @@ final class LowerFromAst implements Pass
         return $out;
     }
 
-    /** `[doc-or-false, line, end-line]` as an array literal (end 0 = the start). */
-    private function docEntry(?string $doc, int $line, \Parser\Ast\Span $sp, int $end = 0): \Parser\Ast\Expr
+    /** php's serialize() of a string. */
+    private static function serStr(string $s): string
     {
-        $docExpr = $doc === null ? \Parser\Ast\Expr::bool(false, $sp) : \Parser\Ast\Expr::string($doc, $sp);
-        return \Parser\Ast\Expr::arrayLit([
-            new \Parser\Ast\ArrayElement(null, $docExpr),
-            new \Parser\Ast\ArrayElement(null, \Parser\Ast\Expr::int($line, $sp)),
-            new \Parser\Ast\ArrayElement(null, \Parser\Ast\Expr::int($end > 0 ? $end : $line, $sp)),
-        ], $sp);
+        return 's:' . (string)\strlen($s) . ':"' . $s . '";';
+    }
+
+    /** php's serialize() of `[doc-or-false, line, end-line]` (end 0 = the start). */
+    private static function serDoc(?string $doc, int $line, int $end = 0): string
+    {
+        return 'a:3:{i:0;' . ($doc === null ? 'b:0;' : self::serStr($doc)) . 'i:1;i:' . (string)$line
+            . ';i:2;i:' . (string)($end > 0 ? $end : $line) . ';}';
     }
 
     /**
