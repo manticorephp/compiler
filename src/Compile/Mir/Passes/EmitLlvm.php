@@ -277,6 +277,12 @@ final class EmitLlvm implements EmitVisitor
     private array $dynamicMethodHelpers = [];
     /** @var array<string, int[]>|null lower-cased method name → ids of the classes the method_exists table lists it for */
     private ?array $methodClassIds = null;
+    /** Dispatch-table data and inline-cache slots ({@see icSlot}), written once after every body. */
+    private string $dispatchDataIr = '';
+    /** @var array<string, int> function symbol => inline-cache slots handed out in it */
+    private array $icOrdinals = [];
+    /** The magic-only helper's symbol once its table is built, else ''. */
+    private string $magicOnlySym = '';
     /** Prevent recursive uniform-ABI selection while emitting an extracted fallback. */
     private bool $dynamicMethodAbiDisabled = false;
 
@@ -789,6 +795,9 @@ final class EmitLlvm implements EmitVisitor
         $this->propDenyRows = [];
         $this->dynamicMethodHelpers = [];
         $this->methodClassIds = null;
+        $this->dispatchDataIr = '';
+        $this->icOrdinals = [];
+        $this->magicOnlySym = '';
         $this->raiseRejected = [];
         $this->dynamicMethodAbiDisabled = false;
         $this->reflectNames = $module->reflectNames;
@@ -969,6 +978,7 @@ final class EmitLlvm implements EmitVisitor
         $this->needsObjectVarsFn = false;
         $this->needsObjectVarsMgFn = false;
         $this->needsGetClassFn = false;
+        $this->needsSerObjFn = false;
         $this->needsBagOfFn = false;
         $this->needsBoxUnknownFn = false;
         $this->eidxNeeded = [];
@@ -983,7 +993,7 @@ final class EmitLlvm implements EmitVisitor
         // program (shared object reuse), and `app` is not hex, so it can never
         // equal a library's token.
         $this->modToken = $this->emitLibrary
-            ? \dechex($this->fnvHash64($module->sourceFile . '|lib'))
+            ? \dechex($this->fnvHash64(($module->sourceFile !== '' ? $module->sourceFile : $this->libIdentity) . '|lib'))
             : 'app';
         $this->vdSyms = [];
         $this->vdExtraBodies = '';
@@ -1372,6 +1382,7 @@ final class EmitLlvm implements EmitVisitor
         if ($this->needsObjectVarsFn) { $extraBodies .= $this->emitObjectVarsFn(); }
         if ($this->needsObjectVarsMgFn) { $extraBodies .= $this->emitObjectVarsFn(true); }
         if ($this->needsGetClassFn) { $extraBodies .= $this->emitGetClassFn(); }
+        if ($this->needsSerObjFn) { $extraBodies .= $this->emitSerObjFn(); }
         if ($this->needsBagOfFn) { $extraBodies .= $this->emitBagOfFn(); }
         if ($this->needsBoxUnknownFn) { $extraBodies .= $this->emitBoxUnknownFn(); }
         $extraBodies .= $this->emitErasedIfaceFns();
@@ -1383,6 +1394,8 @@ final class EmitLlvm implements EmitVisitor
         $extraBodies = '';
         $this->litTablesFlushed = true;
         if ($this->needsInclResolveFn) { $extraParts[] = $this->emitInclResolveFn(); }
+        $extraParts[] = $this->dispatchDataIr;
+        $this->dispatchDataIr = '';
         // Erased fixed-property readers are generated lazily while ordinary
         // functions emit. Append each helper exactly once after the function
         // loop; callers then contain only a small call instead of a repeated
@@ -1557,7 +1570,7 @@ final class EmitLlvm implements EmitVisitor
             }
             $stagedBytes = $eh->bytes;
             \Compile\Stats::step('  exceptions: slot lowering (staged)', $statT, $eh->checks, $eh->mayThrow);
-            \Compile\Stats::line('eh: checks=' . (string)$eh->checks . ' mayThrow=' . (string)$eh->mayThrow);
+            \Compile\Stats::line('eh: checks=' . (string)$eh->checks . ' mayThrow=' . (string)$eh->mayThrow . ' ranges=' . (string)$eh->ranges);
             // PruneIr used to be unreachable from here: this branch returns the
             // staged marker before the in-memory pruner below ever runs, so every
             // manifest build has been handing clang the discardable helpers it
@@ -2490,6 +2503,9 @@ final class EmitLlvm implements EmitVisitor
     /** A site asked for the erased `get_class()` body. */
     private bool $needsGetClassFn = false;
 
+    /** A `serialize()` site asked for the per-class object writers. */
+    private bool $needsSerObjFn = false;
+
     /** A site asked for the unknown-class dynamic-property-bag body. */
     private bool $needsBagOfFn = false;
 
@@ -2562,6 +2578,8 @@ final class EmitLlvm implements EmitVisitor
      * pinned through the optimizer by `@llvm.compiler.used`.
      */
     private string $modToken = '';
+    /** A library's name for {@see $modToken} when its module has no source file (every manifest build): the output's basename. */
+    public string $libIdentity = '';
 
     /** A module-local helper's symbol, tagged with {@see $modToken}. */
     protected function mirHelperSym(string $base): string

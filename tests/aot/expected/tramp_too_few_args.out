@@ -1,0 +1,10 @@
+reflect ok = 13
+reflect few = reflect few: ArgumentCountError
+reflect args few = reflect args few: ArgumentCountError
+static few = static few: ArgumentCountError
+dyn ok = 17
+dyn few = dyn few: ArgumentCountError
+new ok = need 1 2
+made
+new few = new few: ArgumentCountError
+newInstanceArgs few = newInstanceArgs few: ArgumentCountError

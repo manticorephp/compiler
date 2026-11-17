@@ -1,0 +1,112 @@
+object(App\Dump\Child)#1 (5) {
+  ["secret":"App\Dump\Base":private]=>
+  int(1)
+  ["kind":protected]=>
+  string(4) "base"
+  ["next"]=>
+  object(App\Dump\Base)#2 (3) {
+    ["secret":"App\Dump\Base":private]=>
+    int(1)
+    ["kind":protected]=>
+    string(4) "base"
+    ["next"]=>
+    NULL
+  }
+  ["secret":"App\Dump\Child":private]=>
+  int(2)
+  ["tags"]=>
+  array(2) {
+    [0]=>
+    string(1) "a"
+    [1]=>
+    string(1) "b"
+  }
+}
+object(App\Dump\Partial)#6 (2) {
+  ["set"]=>
+  int(1)
+  ["late"]=>
+  uninitialized(int)
+  ["maybe"]=>
+  NULL
+}
+object(App\Dump\Dyn)#3 (3) {
+  ["a"]=>
+  int(1)
+  ["extra"]=>
+  string(1) "x"
+  ["7"]=>
+  string(5) "seven"
+}
+object(App\Dump\Dbg)#7 (2) {
+  ["shown"]=>
+  int(7)
+  [3]=>
+  string(5) "three"
+}
+object(App\Dump\Hooked)#8 (1) {
+  ["first"]=>
+  string(3) "Ada"
+}
+object(App\Dump\HookedChild)#9 (2) {
+  ["first"]=>
+  string(3) "Ada"
+  ["extra"]=>
+  int(4)
+}
+object(App\Dump\Ro)#10 (2) {
+  ["id"]=>
+  int(9)
+  ["name":protected]=>
+  string(1) "n"
+}
+enum(App\Dump\Suit::Hearts)
+object(stdClass)#4 (1) {
+  ["p"]=>
+  int(1)
+}
+object(App\Dump\Partial)#5 (3) {
+  ["set"]=>
+  int(1)
+  ["late"]=>
+  int(5)
+  ["maybe"]=>
+  NULL
+}
+array(2) {
+  [0]=>
+  object(App\Dump\Child)#1 (5) {
+    ["secret":"App\Dump\Base":private]=>
+    int(1)
+    ["kind":protected]=>
+    string(4) "base"
+    ["next"]=>
+    object(App\Dump\Base)#2 (3) {
+      ["secret":"App\Dump\Base":private]=>
+      int(1)
+      ["kind":protected]=>
+      string(4) "base"
+      ["next"]=>
+      NULL
+    }
+    ["secret":"App\Dump\Child":private]=>
+    int(2)
+    ["tags"]=>
+    array(2) {
+      [0]=>
+      string(1) "a"
+      [1]=>
+      string(1) "b"
+    }
+  }
+  ["k"]=>
+  object(stdClass)#4 (1) {
+    ["p"]=>
+    int(1)
+  }
+}
+\App\Dump\HookedChild::__set_state(array(
+   'first' => 'Ada',
+   'full' => 'Ada L',
+   'extra' => 4,
+))

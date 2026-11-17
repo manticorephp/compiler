@@ -1,0 +1,21 @@
+O:13:"App\Ser\Child":5:{s:20:"~App\Ser\Base~secret";i:1;s:7:"~*~kind";s:4:"base";s:4:"next";O:12:"App\Ser\Base":3:{s:20:"~App\Ser\Base~secret";i:1;s:7:"~*~kind";s:4:"base";s:4:"next";N;}s:21:"~App\Ser\Child~secret";i:2;s:4:"tags";a:2:{i:0;s:1:"a";i:1;s:1:"b";}}
+round trip ok
+O:15:"App\Ser\Partial":2:{s:3:"set";i:1;s:5:"maybe";N;}
+round trip ok
+O:11:"App\Ser\Dyn":3:{s:1:"a";i:1;s:5:"extra";s:1:"x";s:1:"7";s:5:"seven";}
+round trip ok
+O:14:"App\Ser\Custom":2:{s:1:"x";i:3;i:5;s:4:"five";}
+round trip ok
+O:14:"App\Ser\Hooked":2:{s:5:"first";s:3:"Ada";s:6:"stored";i:3;}
+round trip ok
+O:10:"App\Ser\Ro":2:{s:2:"id";i:9;s:7:"~*~name";s:1:"n";}
+round trip ok
+E:19:"App\Ser\Suit:Hearts";
+round trip ok
+O:8:"stdClass":1:{s:1:"p";i:1;}
+round trip ok
+O:12:"App\Ser\Base":3:{s:20:"~App\Ser\Base~secret";i:1;s:7:"~*~kind";s:4:"base";s:4:"next";N;}
+round trip ok
+a:2:{i:0;O:12:"App\Ser\Base":3:{s:20:"~App\Ser\Base~secret";i:1;s:7:"~*~kind";s:4:"base";s:4:"next";N;}i:1;O:13:"App\Ser\Child":5:{s:20:"~App\Ser\Base~secret";i:1;s:7:"~*~kind";s:4:"base";s:4:"next";r:2;s:21:"~App\Ser\Child~secret";i:2;s:4:"tags";a:2:{i:0;s:1:"a";i:1;s:1:"b";}}}
+round trip ok
+a:10:{i:0;O:13:"App\Ser\Child":5:{s:20:"~App\Ser\Base~secret";i:1;s:7:"~*~kind";s:4:"base";s:4:"next";O:12:"App\Ser\Base":3:{s:20:"~App\Ser\Base~secret";i:1;s:7:"~*~kind";s:4:"base";s:4:"next";N;}s:21:"~App\Ser\Child~secret";i:2;s:4:"tags";a:2:{i:0;s:1:"a";i:1;s:1:"b";}}i:1;O:15:"App\Ser\Partial":2:{s:3:"set";i:1;s:5:"maybe";N;}i:2;O:11:"App\Ser\Dyn":3:{s:1:"a";i:1;s:5:"extra";s:1:"x";s:1:"7";s:5:"seven";}i:3;O:14:"App\Ser\Custom":2:{s:1:"x";i:3;i:5;s:4:"five";}i:4;O:14:"App\Ser\Hooked":2:{s:5:"first";s:3:"Ada";s:6:"stored";i:3;}i:5;O:10:"App\Ser\Ro":2:{s:2:"id";i:9;s:7:"~*~name";s:1:"n";}i:6;E:19:"App\Ser\Suit:Hearts";i:7;O:8:"stdClass":1:{s:1:"p";i:1;}i:8;r:5;i:9;a:2:{i:0;r:5;i:1;r:2;}}

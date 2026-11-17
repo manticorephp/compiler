@@ -48,6 +48,11 @@ final class TrampolineSynth
     /** Reflection is linked: a constructor also gets the instance-style trampoline. */
     public static bool $ctorCall = false;
 
+    /** @var array<string, bool> names of the synthesized parameter-default factories (`__mc_pdef_*`) */
+    public static array $defaultFactories = [];
+    /** @var array<string, bool> lower-cased `class::method` whose body counts its arguments ({@see \Parser\Ast\MethodDecl::$countsArgs}) */
+    public static array $countsArgs = [];
+
     /** The symbol suffix of a constructor's instance-style trampoline ({@see sourceFor}). */
     public const CTOR_CALL = '__construct_call';
 
@@ -339,6 +344,21 @@ final class TrampolineSynth
             . "      . (\$scope === '' ? 'global scope' : 'scope ' . \$scope));\n"
             . "}\n";
     }
+
+    /** The one function every trampoline's arity guard calls. */
+    public const TOO_FEW = '__mc_tramp_too_few';
+
+    /**
+     * php's ArgumentCountError for a trampoline handed fewer arguments than the method requires —
+     * one shared body: built inline, the error object and its message were ~75 IR lines in every
+     * trampoline with a required parameter (a fifth of all trampoline IR on a Symfony app).
+     */
+    public static function tooFewSource(): string
+    {
+        return 'function ' . self::TOO_FEW . "(int \$n, int \$req): void {\n"
+            . "  throw new \\ArgumentCountError('Too few arguments: ' . \$n . ' passed and at least ' . \$req . ' expected');\n}\n";
+    }
+
     /** `new \\C(args)` — recv ignored. Arms from the ctor's required..total. */
     private static function ctorTramp(string $class, ?MethodMeta $ctor): string
     {
@@ -347,7 +367,9 @@ final class TrampolineSynth
         $tot = $ctor === null ? 0 : \count($ctor->params);
         $name = self::symBase($class, '__construct');
         $mk = fn (string $args): string => 'new ' . $fqn . '(' . $args . ')';
-        $body = self::$bindByName ? self::spreadBody($mk, false) : self::arms($req, $tot, $mk, false);
+        $decl = $ctor === null || $ctor->declaringClass === '' ? $class : $ctor->declaringClass;
+        $defaults = $ctor === null ? null : self::singleCallDefaults($decl, '__construct', $ctor);
+        $body = self::$bindByName ? self::spreadBody($mk, false) : self::arms($req, $tot, $mk, false, $defaults);
         return self::ARGS_HINT . 'function ' . $name . "(int \$t, array \$a): mixed {\n" . $body . "}\n";
     }
 
@@ -367,7 +389,8 @@ final class TrampolineSynth
         }
         $name = self::symBase($class, $symMethod !== '' ? $symMethod : $method);
         $variadic = $tot > 0 && $mm->params[$tot - 1]->variadic;
-        $body = ($variadic || self::$bindByName) ? self::spreadBody($mk, $void) : self::arms($req, $tot, $mk, $void);
+        $defaults = self::singleCallDefaults($class, $method, $mm);
+        $body = ($variadic || self::$bindByName) ? self::spreadBody($mk, $void) : self::arms($req, $tot, $mk, $void, $defaults);
         return self::ARGS_HINT . 'function ' . $name . '(' . $recv . ", array \$a): mixed {\n" . $body . "}\n";
     }
 
@@ -384,8 +407,16 @@ final class TrampolineSynth
      * that arm's defaults. `$mk(argsExpr)` builds the call expression from a
      * comma list `$a[0], $a[1], …`. A void call returns null (an undefined i64
      * result otherwise). When R==T there is a single tail call, no count().
+     *
+     * With `$defaults` (one default-factory name per optional position R..T-1)
+     * there is ONE call instead: a missing argument is that parameter's
+     * `__mc_pdef_*` factory value, so each argument is read and coerced once,
+     * not once per arm. Passing a default explicitly is what an omitted argument
+     * means, for every callee that does not count its arguments.
+     *
+     * @param string[]|null $defaults
      */
-    private static function arms(int $req, int $tot, callable $mk, bool $void): string
+    private static function arms(int $req, int $tot, callable $mk, bool $void, ?array $defaults = null): string
     {
         $stmt = function (string $call) use ($void): string {
             return $void ? ('  ' . $call . "; return null;\n") : ('  return ' . $call . ";\n");
@@ -396,16 +427,47 @@ final class TrampolineSynth
             return \implode(', ', $parts);
         };
         $guard = $req > 0
-            ? '  if (count($a) < ' . (string)$req . ") { throw new \\ArgumentCountError('Too few arguments: ' . count(\$a) . ' passed and at least " . (string)$req . " expected'); }\n"
+            ? '  if (count($a) < ' . (string)$req . ') { \\' . self::TOO_FEW . '(count($a), ' . (string)$req . "); }\n"
             : '';
         if ($req >= $tot) {
             return $guard . $stmt($mk($argsUpTo($tot)));
         }
         $out = $guard . "  \$n = count(\$a);\n";
+        if ($defaults !== null) {
+            $parts = [];
+            for ($i = 0; $i < $req; $i = $i + 1) { $parts[] = '$a[' . (string)$i . ']'; }
+            for ($k = $req; $k < $tot; $k = $k + 1) {
+                $parts[] = '($n > ' . (string)$k . ' ? $a[' . (string)$k . '] : \\' . $defaults[$k - $req] . '())';
+            }
+            return $out . $stmt($mk(\implode(', ', $parts)));
+        }
         for ($k = $req; $k < $tot; $k = $k + 1) {
             $out .= '  if ($n <= ' . (string)$k . ") {\n  " . $stmt($mk($argsUpTo($k))) . "  }\n";
         }
         $out .= $stmt($mk($argsUpTo($tot)));
+        return $out;
+    }
+
+    /**
+     * The default factories a single-call trampoline for `$declClass::$method` may use for its
+     * optional parameters, or null when it must keep its per-arity arms: a by-reference parameter
+     * (a ternary hands it a temporary, not the element), a method that counts its arguments
+     * (`func_get_args`), or a default without a synthesized factory.
+     *
+     * @return string[]|null
+     */
+    private static function singleCallDefaults(string $declClass, string $method, MethodMeta $mm): ?array
+    {
+        if (isset(self::$countsArgs[\strtolower(\ltrim($declClass, '\\') . '::' . $method)])) { return null; }
+        $req = $mm->requiredParams();
+        $out = [];
+        foreach ($mm->params as $pi => $p) {
+            if ($p->byRef) { return null; }
+            if ($pi < $req) { continue; }
+            $f = ReflectSynth::paramDefaultFn($declClass, $method, (int)$pi);
+            if (!isset(self::$defaultFactories[$f])) { return null; }
+            $out[] = $f;
+        }
         return $out;
     }
 }

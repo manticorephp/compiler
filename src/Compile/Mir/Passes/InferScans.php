@@ -1024,13 +1024,57 @@ trait InferScans
         $shape = [];                     // "fn#idx" → 'v' (vec) | 'a' (assoc)
         $sawCell = [];                   // "fn#idx" → true (a vec[cell] arg seen)
         $erasedArg = [];                 // "fn#idx" → true (an UNOBSERVABLE arg seen)
+        $verify = $this->scanVerifyOn();
+        /** @var array<string, Type> */
+        $vObserved = [];
+        $vConflict = [];
+        /** @var array<string, Type> */
+        $vAssocKey = [];
+        $vShape = [];
+        $vSawCell = [];
+        $vErasedArg = [];
+        /** @var array<string, string[]> */
+        $vForward = [];
+        if ($verify) {
+            $this->callArgForward = [];
+            foreach ($module->functions as $fn) {
+                $this->callArgScanFn = $fn->name;
+                $this->callArgScanParams = [];
+                $pi = 0;
+                foreach ($fn->params as $fp) { $this->callArgScanParams[$fp->name] = $pi; $pi = $pi + 1; }
+                $this->collectCallArgElems($fn->body, $cand, $vObserved, $vConflict, $vAssocKey, $vShape, $vSawCell, $vErasedArg);
+            }
+            $vForward = $this->callArgForward;
+        }
+        // The call sites of each body, replayed from {@see bodyNodesOf} in the
+        // order the walk above visits them.
         $this->callArgForward = [];
+        $this->callArgCandByFn = self::candPrefixIndex($cand);
         foreach ($module->functions as $fn) {
             $this->callArgScanFn = $fn->name;
             $this->callArgScanParams = [];
             $pi = 0;
             foreach ($fn->params as $fp) { $this->callArgScanParams[$fp->name] = $pi; $pi = $pi + 1; }
-            $this->collectCallArgElems($fn->body, $cand, $observed, $conflict, $assocKey, $shape, $sawCell, $erasedArg);
+            foreach ($this->bodyNodesOf($fn, 'callsite') as $cn) {
+                $this->callArgElemsAt($cn, $cand, $observed, $conflict, $assocKey, $shape, $sawCell, $erasedArg);
+            }
+        }
+        $this->callArgCandByFn = null;
+        if ($verify) {
+            $fwdA = [];
+            foreach ($vForward as $fk => $srcs) { $fwdA[$fk] = \implode(',', $srcs); }
+            $fwdB = [];
+            foreach ($this->callArgForward as $fk => $srcs) { $fwdB[$fk] = \implode(',', $srcs); }
+            $bad = self::scanTypeMapDiff('observed', $vObserved, $observed)
+                . self::scanSetDiff('conflict', $vConflict, $conflict)
+                . self::scanTypeMapDiff('assocKey', $vAssocKey, $assocKey)
+                . self::scanStrMapDiff('shape', $vShape, $shape)
+                . self::scanSetDiff('sawCell', $vSawCell, $sawCell)
+                . self::scanSetDiff('erasedArg', $vErasedArg, $erasedArg)
+                . self::scanStrMapDiff('callArgForward', $fwdA, $fwdB);
+            if ($bad !== '') {
+                throw new \RuntimeException('MIR.infer: MANTICORE_SCAN_VERIFY: scanCallSiteArrayElems replay differs from the walk:' . $bad);
+            }
         }
         // A site that forwards its caller's still-erased candidate param says
         // what that param will say: nothing, if it resolves to no observation or
@@ -1272,7 +1316,19 @@ trait InferScans
         if (\count($cand) === 0 && \count($propCand) === 0) { return false; }
         $promote = [];                   // "fn#idx" / "Class::prop" → true
         foreach ($module->functions as $fn) {
-            $this->collectDocListKeyArgs($fn->body, $cand, $propCand, $promote);
+            foreach ($this->bodyNodesOf($fn, 'callsite') as $cn) {
+                $this->docListKeyArgsAt($cn, $cand, $propCand, $promote);
+            }
+        }
+        if ($this->scanVerifyOn()) {
+            $vPromote = [];
+            foreach ($module->functions as $fn) {
+                $this->collectDocListKeyArgs($fn->body, $cand, $propCand, $vPromote);
+            }
+            $bad = self::scanSetDiff('promote', $vPromote, $promote);
+            if ($bad !== '') {
+                throw new \RuntimeException('MIR.infer: MANTICORE_SCAN_VERIFY: scanDocListKeyPromote replay differs from the walk:' . $bad);
+            }
         }
         if (\count($promote) === 0) { return false; }
         $changed = false;
@@ -1321,6 +1377,21 @@ trait InferScans
      */
     private function collectDocListKeyArgs(Node $n, array $cand, array $propCand, array &$promote): void
     {
+        $this->docListKeyArgsAt($n, $cand, $propCand, $promote);
+        foreach (Walk::children($n) as $c) {
+            $this->collectDocListKeyArgs($c, $cand, $propCand, $promote);
+        }
+    }
+
+    /**
+     * The per-node step of {@see collectDocListKeyArgs}; replayed over
+     * {@see bodyNodesOf} like {@see callArgElemsAt}.
+     * @param array<string,bool> $cand
+     * @param array<string,bool> $propCand
+     * @param array<string,bool> $promote
+     */
+    private function docListKeyArgsAt(Node $n, array $cand, array $propCand, array &$promote): void
+    {
         // `$this->prop = <string-keyed array>` — the property analogue of an
         // argument, and the step that carries the promotion past the parameter.
         if ($n->kind === Node::KIND_STORE_PROPERTY) {
@@ -1358,9 +1429,6 @@ trait InferScans
                 if (!isset($cand[$key])) { continue; }
                 if ($this->keyIsNonPacked($a->type)) { $promote[$key] = true; }
             }
-        }
-        foreach (Walk::children($n) as $c) {
-            $this->collectDocListKeyArgs($c, $cand, $propCand, $promote);
         }
     }
 
@@ -2092,7 +2160,8 @@ trait InferScans
             // argument boundary ({@see EmitLlvmCalls::emitArgCollectingLitElems}).
             $whole = [];
             $elemStored = [];
-            $this->scanWholeStoreElemClasses($fn->body, $whole, $elemStored);
+            $stores = $this->bodyNodesOf($fn, 'stores');
+            foreach ($stores as $sn) { $this->scanWholeStoreElemClasses($sn, $whole, $elemStored, false); }
             $postMono = $module->hasPassApplied(Monomorphize::NAME);
             foreach ($whole as $name => $seen) {
                 if (\count($seen) < 2 || isset($seen['shape'])) { continue; }
@@ -2112,7 +2181,7 @@ trait InferScans
             if (!$this->bodyHas($fn, 'se:' . Node::KIND_LOAD_LOCAL)
                 && !$this->bodyHas($fn, 'se:' . Node::KIND_ARRAY_ACCESS)) { continue; }
             $found = [];
-            $this->scanLocalElemNode($fn->body, $found);
+            foreach ($stores as $sn) { $this->scanLocalElemNode($sn, $found, false); }
             // The same erasure with two CONCRETE stores instead of a cell one:
             // `$out[] = $v` in a foreach over a vec[int] and `$out[] = $w` in a
             // foreach over a vec[string] make a genuinely mixed array, but the
@@ -2120,7 +2189,24 @@ trait InferScans
             // classifies neither, so `$out` took the first store's element and
             // the second landed RAW (a string pointer read back as int).
             $classes = [];
-            $this->scanLocalElemClasses($fn->body, $classes);
+            foreach ($stores as $sn) { $this->scanLocalElemClasses($sn, $classes, false); }
+            if ($this->scanVerifyOn()) {
+                $vWhole = [];
+                $vElemStored = [];
+                $this->scanWholeStoreElemClasses($fn->body, $vWhole, $vElemStored);
+                $vFound = [];
+                $this->scanLocalElemNode($fn->body, $vFound);
+                $vClasses = [];
+                $this->scanLocalElemClasses($fn->body, $vClasses);
+                $bad = self::scanSetDiff('whole', self::flatSet($vWhole), self::flatSet($whole))
+                    . self::scanSetDiff('elemStored', $vElemStored, $elemStored)
+                    . self::scanSetDiff('found', $vFound, $found)
+                    . self::scanSetDiff('classes', self::flatSet($vClasses), self::flatSet($classes));
+                if ($bad !== '') {
+                    throw new \RuntimeException('MIR.infer: MANTICORE_SCAN_VERIFY: scanLocalElemFromStores replay differs from the walk in '
+                        . $fn->name . ':' . $bad);
+                }
+            }
             foreach ($classes as $name => $seen) {
                 // A `use ($a)` copy holds the capture site's elements too.
                 $cap = $this->valueCaptureElemClass($fn, $name);
@@ -2132,7 +2218,16 @@ trait InferScans
             $skip = [];
             foreach ($fn->params as $prm) { $skip[$prm->name] = true; }
             $lits = [];
-            $this->scanArrayLitLocals($fn->body, $lits);
+            foreach ($stores as $sn) { $this->scanArrayLitLocals($sn, $lits, false); }
+            if ($this->scanVerifyOn()) {
+                $vLits = [];
+                $this->scanArrayLitLocals($fn->body, $vLits);
+                $bad = self::scanSetDiff('lits', $vLits, $lits);
+                if ($bad !== '') {
+                    throw new \RuntimeException('MIR.infer: MANTICORE_SCAN_VERIFY: scanArrayLitLocals replay differs from the walk in '
+                        . $fn->name . ':' . $bad);
+                }
+            }
             foreach ($found as $name => $unused) {
                 if (isset($this->forcedCellElemLocals[$fn->name][$name])) { continue; }
                 if (!$this->ownsElemRepr($fn, $name, $skip, $lits)) { continue; }
@@ -2154,7 +2249,7 @@ trait InferScans
      *
      * @param array<string, array<string,bool>> $out
      */
-    private function scanLocalElemClasses(Node $n, array &$out): void
+    private function scanLocalElemClasses(Node $n, array &$out, bool $deep = true): void
     {
         if ($n->kind === Node::KIND_STORE_ELEMENT) {
             $se = $n;
@@ -2171,7 +2266,7 @@ trait InferScans
                 }
             }
         }
-        foreach (Walk::children($n) as $c) { $this->scanLocalElemClasses($c, $out); }
+        if ($deep) { foreach (Walk::children($n) as $c) { $this->scanLocalElemClasses($c, $out); } }
     }
 
     /**
@@ -2183,7 +2278,7 @@ trait InferScans
      * @param array<string, array<string,bool>> $out
      * @param array<string, bool> $elemStored
      */
-    private function scanWholeStoreElemClasses(Node $n, array &$out, array &$elemStored): void
+    private function scanWholeStoreElemClasses(Node $n, array &$out, array &$elemStored, bool $deep = true): void
     {
         if ($n->kind === Node::KIND_STORE_ELEMENT && $n->array->kind === Node::KIND_LOAD_LOCAL) {
             $elemStored[$n->array->name] = true;
@@ -2199,7 +2294,7 @@ trait InferScans
                 }
             }
         }
-        foreach (Walk::children($n) as $c) { $this->scanWholeStoreElemClasses($c, $out, $elemStored); }
+        if ($deep) { foreach (Walk::children($n) as $c) { $this->scanWholeStoreElemClasses($c, $out, $elemStored); } }
     }
 
     /** The {@see coarseValueClass} class of an INFERRED type, or '' when the type
@@ -2353,12 +2448,12 @@ trait InferScans
 
     /** Locals assigned an array LITERAL in this body — the ones whose element
      *  representation this function itself owns. @param array<string,bool> $out */
-    private function scanArrayLitLocals(Node $n, array &$out): void
+    private function scanArrayLitLocals(Node $n, array &$out, bool $deep = true): void
     {
         if ($n->kind === Node::KIND_STORE_LOCAL && $n->value->kind === Node::KIND_ARRAY_LIT) {
             $out[$n->name] = true;
         }
-        foreach (Walk::children($n) as $c) { $this->scanArrayLitLocals($c, $out); }
+        if ($deep) { foreach (Walk::children($n) as $c) { $this->scanArrayLitLocals($c, $out); } }
     }
 
     /**
@@ -2422,7 +2517,16 @@ trait InferScans
             // A locally-CONSTRUCTED `[]` is ours to retype; a param only where
             // its representation is converted ({@see widenElemParam}).
             $found = [];
-            $this->collectByRefWidenArgs($fn->body, $foreign, $found);
+            foreach ($this->bodyNodesOf($fn, 'byref') as $bn) { $this->collectByRefWidenArgs($bn, $foreign, $found, false); }
+            if ($this->scanVerifyOn()) {
+                $vFound = [];
+                $this->collectByRefWidenArgs($fn->body, $foreign, $vFound);
+                $bad = self::scanSetDiff('found', $vFound, $found);
+                if ($bad !== '') {
+                    throw new \RuntimeException('MIR.infer: MANTICORE_SCAN_VERIFY: scanByRefElemWiden replay differs from the walk in '
+                        . $fn->name . ':' . $bad);
+                }
+            }
             // The literal walk only answers for a candidate — most bodies have
             // none, and this scan runs twice per InferTypes run.
             if ($found === []) { continue; }
@@ -2513,7 +2617,18 @@ trait InferScans
             $paramVariadic[$prm->name] = $prm->variadic;
         }
         $tokens = [];
-        $this->collectForeignTokens($fn->body, $pname, $origin, $paramIdx, $paramVariadic, $map, $tokens);
+        foreach ($this->bodyNodesOf($fn, 'byref') as $bn) {
+            $this->collectForeignTokens($bn, $pname, $origin, $paramIdx, $paramVariadic, $map, $tokens, false);
+        }
+        if ($this->scanVerifyOn()) {
+            $vTokens = [];
+            $this->collectForeignTokens($fn->body, $pname, $origin, $paramIdx, $paramVariadic, $map, $vTokens);
+            $bad = self::scanSetDiff('tokens', $vTokens, $tokens);
+            if ($bad !== '') {
+                throw new \RuntimeException('MIR.infer: MANTICORE_SCAN_VERIFY: foreignElemTokens replay differs from the walk in '
+                    . $fn->name . '/$' . $pname . ':' . $bad);
+            }
+        }
         return $tokens;
     }
 
@@ -2526,14 +2641,33 @@ trait InferScans
         $origin = [];
         foreach ($fn->params as $prm) { $origin[$prm->name] = $prm->name . '|0'; }
         $guard = 0;
-        while ($guard < 3 && $this->spreadElemOrigin($fn->body, $origin)) { $guard = $guard + 1; }
+        $nodes = $this->bodyNodesOf($fn, 'byref');
+        while ($guard < 3) {
+            $added = false;
+            foreach ($nodes as $bn) {
+                if ($this->spreadElemOrigin($bn, $origin, false)) { $added = true; }
+            }
+            if (!$added) { break; }
+            $guard = $guard + 1;
+        }
+        if ($this->scanVerifyOn()) {
+            $vOrigin = [];
+            foreach ($fn->params as $prm) { $vOrigin[$prm->name] = $prm->name . '|0'; }
+            $vGuard = 0;
+            while ($vGuard < 3 && $this->spreadElemOrigin($fn->body, $vOrigin)) { $vGuard = $vGuard + 1; }
+            $bad = self::scanStrMapDiff('origin', $vOrigin, $origin);
+            if ($bad !== '') {
+                throw new \RuntimeException('MIR.infer: MANTICORE_SCAN_VERIFY: elemOrigins replay differs from the walk in '
+                    . $fn->name . ':' . $bad);
+            }
+        }
         return $origin;
     }
 
     /** One round of origin flow: a local filled out of a param-derived array (or
      *  bound by a foreach over one) carries that param's elements.
      *  @param array<string,string> $origin */
-    private function spreadElemOrigin(Node $n, array &$origin): bool
+    private function spreadElemOrigin(Node $n, array &$origin, bool $deep = true): bool
     {
         $added = false;
         if ($n->kind === Node::KIND_STORE_LOCAL) {
@@ -2556,9 +2690,9 @@ trait InferScans
                 $added = true;
             }
         }
-        foreach (Walk::children($n) as $c) {
+        if ($deep) { foreach (Walk::children($n) as $c) {
             if ($this->spreadElemOrigin($c, $origin)) { $added = true; }
-        }
+        } }
         return $added;
     }
 
@@ -2584,6 +2718,7 @@ trait InferScans
     private function boxParamAtEntry(FunctionDef $fn, string $name): void
     {
         if ($fn->isExtern || !$this->paramArrivesRaw($fn, $name)) { return; }
+        $this->touchBody($fn->name);
         foreach ($fn->body->stmts as $s) {
             if ($s->kind !== Node::KIND_STORE_LOCAL || $s->name !== $name) { continue; }
             $v = $s->value;
@@ -2661,6 +2796,7 @@ trait InferScans
         array $paramVariadic,
         array $map,
         array &$tokens,
+        bool $deep = true,
     ): void {
         if ($n->kind === Node::KIND_STORE_LOCAL && $n->name === $pname) {
             // A WHOLE-array write-back (`$input = $out;`, the shape every rebuild
@@ -2743,9 +2879,9 @@ trait InferScans
                 }
             }
         }
-        foreach (Walk::children($n) as $c) {
+        if ($deep) { foreach (Walk::children($n) as $c) {
             $this->collectForeignTokens($c, $pname, $origin, $paramIdx, $paramVariadic, $map, $tokens);
-        }
+        } }
     }
 
     /** A param-sourced append token, or null when the source IS the by-ref array
@@ -2770,7 +2906,7 @@ trait InferScans
      * @param array<string, array<string,bool>> $foreign
      * @param array<string,bool> $found
      */
-    private function collectByRefWidenArgs(Node $n, array $foreign, array &$found): void
+    private function collectByRefWidenArgs(Node $n, array $foreign, array &$found, bool $deep = true): void
     {
         if ($n->kind === Node::KIND_CALL || $n->kind === Node::KIND_STATIC_CALL
             || $n->kind === Node::KIND_METHOD_CALL || $n->kind === Node::KIND_NEW_OBJ) {
@@ -2815,9 +2951,9 @@ trait InferScans
                 $this->widenIfForeign($key, $cap, $cl->captures, $foreign, $found);
             }
         }
-        foreach (Walk::children($n) as $ch) {
+        if ($deep) { foreach (Walk::children($n) as $ch) {
             $this->collectByRefWidenArgs($ch, $foreign, $found);
-        }
+        } }
     }
 
     /**
@@ -2922,7 +3058,7 @@ trait InferScans
     }
 
     /** @param array<string,bool> $found */
-    private function scanLocalElemNode(Node $n, array &$found): void
+    private function scanLocalElemNode(Node $n, array &$found, bool $deep = true): void
     {
         if ($n->kind === Node::KIND_STORE_ELEMENT) {
             $se = $n;
@@ -2957,7 +3093,7 @@ trait InferScans
                 }
             }
         }
-        foreach (Walk::children($n) as $c) { $this->scanLocalElemNode($c, $found); }
+        if ($deep) { foreach (Walk::children($n) as $c) { $this->scanLocalElemNode($c, $found); } }
     }
 
     /**
@@ -3419,8 +3555,23 @@ trait InferScans
             $elems = [];
             $props = [];
             $statics = [];
-            $this->scanRefCellArgNode($fn->body, $names, $elems, $props, $statics);
-            $this->scanMixedRefPointerLocals($fn->body, $fn->body, $names);
+            $sites = $this->bodyNodesOf($fn, 'callsite');
+            foreach ($sites as $cn) { $this->refCellArgAt($cn, $names, $elems, $props, $statics); }
+            foreach ($sites as $cn) { $this->mixedRefPointerAt($fn->body, $cn, $names); }
+            if ($this->scanVerifyOn()) {
+                $vNames = [];
+                $vElems = [];
+                $vProps = [];
+                $vStatics = [];
+                $this->scanRefCellArgNode($fn->body, $vNames, $vElems, $vProps, $vStatics);
+                $this->scanMixedRefPointerLocals($fn->body, $fn->body, $vNames);
+                $bad = self::scanSetDiff('names', $vNames, $names) . self::scanSetDiff('elems', $vElems, $elems)
+                    . self::scanSetDiff('props', $vProps, $props) . self::scanSetDiff('statics', $vStatics, $statics);
+                if ($bad !== '') {
+                    throw new \RuntimeException('MIR.infer: MANTICORE_SCAN_VERIFY: scanRefCellArgWiden replay differs from the walk in '
+                        . $fn->name . ':' . $bad);
+                }
+            }
             foreach ($names as $local => $unused) {
                 if (!isset($this->byRefCaptureCellLocals[$fn->name][$local])) {
                     $this->byRefCaptureCellLocals[$fn->name][$local] = true;
@@ -3733,6 +3884,21 @@ trait InferScans
      */
     private function scanRefCellArgNode(Node $n, array &$names, array &$elems, array &$props, array &$statics): void
     {
+        $this->refCellArgAt($n, $names, $elems, $props, $statics);
+        foreach (Walk::children($n) as $c) {
+            $this->scanRefCellArgNode($c, $names, $elems, $props, $statics);
+        }
+    }
+
+    /**
+     * The per-node step of {@see scanRefCellArgNode}, replayed over {@see bodyNodesOf}.
+     * @param array<string,bool> $names
+     * @param array<string,bool> $elems
+     * @param array<string,bool> $props
+     * @param array<string,bool> $statics
+     */
+    private function refCellArgAt(Node $n, array &$names, array &$elems, array &$props, array &$statics): void
+    {
         $offset = 0;
         $fname = $this->refCalleeOf($n, $offset);
         if ($fname !== '') {
@@ -3800,9 +3966,6 @@ trait InferScans
                 $this->refArrayArgSink($n->args[0], $elems, $props, $statics);
             }
         }
-        foreach (Walk::children($n) as $c) {
-            $this->scanRefCellArgNode($c, $names, $elems, $props, $statics);
-        }
     }
 
     /**
@@ -3815,6 +3978,16 @@ trait InferScans
      * @param array<string,bool> $names
      */
     private function scanMixedRefPointerLocals(Node $body, Node $n, array &$names): void
+    {
+        $this->mixedRefPointerAt($body, $n, $names);
+        foreach (Walk::children($n) as $c) {
+            $this->scanMixedRefPointerLocals($body, $c, $names);
+        }
+    }
+
+    /** The per-node step of {@see scanMixedRefPointerLocals}, replayed over {@see bodyNodesOf}.
+     *  @param array<string,bool> $names */
+    private function mixedRefPointerAt(Node $body, Node $n, array &$names): void
     {
         $offset = 0;
         $fname = $this->refCalleeOf($n, $offset);
@@ -3831,9 +4004,6 @@ trait InferScans
                 if ($an === '' || isset($names[$an])) { continue; }
                 if ($this->localHoldsOtherPointer($body, $an, $pk)) { $names[$an] = true; }
             }
-        }
-        foreach (Walk::children($n) as $c) {
-            $this->scanMixedRefPointerLocals($body, $c, $names);
         }
     }
 

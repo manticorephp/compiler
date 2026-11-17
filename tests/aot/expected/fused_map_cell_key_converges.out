@@ -1,0 +1,13 @@
+home
+  - index
+  - start
+blog
+  - posts
+  - 7
+a, b, a
+string(5) "first"
+A
+int(7)
+B
+string(5) "third"
+A

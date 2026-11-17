@@ -1,0 +1,21 @@
+ok Error: Unknown named parameter $x
+ok 12
+ok 12
+ok 1,2
+ok Error: Unknown named parameter $a
+ok Error: Unknown named parameter $a
+ok Error: Unknown named parameter $y
+ok 34
+ok 34
+ok Error: Unknown named parameter $x
+ok Error: Unknown named parameter $nope
+ok Error: Unknown named parameter $nope
+ok Error: Unknown named parameter $q
+ok Error: Unknown named parameter $q
+ok Error: Unknown named parameter $q
+ok Error: Unknown named parameter $y
+ok Error: Cannot use positional argument after named argument during unpacking
+ok Error: Cannot use positional argument after named argument during unpacking
+0 Error: Unknown named parameter $zz @spread_badkey_dynamic_dispatch.php
+1 Error: Unknown named parameter $q @spread_badkey_dynamic_dispatch.php
+2 Error: Cannot use positional argument after named argument during unpacking @spread_badkey_dynamic_dispatch.php

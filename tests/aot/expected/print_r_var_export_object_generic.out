@@ -1,0 +1,156 @@
+App\Model\Child Object
+(
+    [secret:App\Model\Base:private] => 1
+    [kind:protected] => base
+    [next] => App\Model\Base Object
+        (
+            [secret:App\Model\Base:private] => 1
+            [kind:protected] => base
+            [next] => 
+        )
+
+    [secret:App\Model\Child:private] => 2
+    [tags] => Array
+        (
+            [0] => a
+            [1] => b
+        )
+
+)
+
+App\Model\Dyn Object
+(
+    [a] => 1
+    [extra] => x
+    [7] => seven
+)
+
+App\Model\Dbg Object
+(
+    [shown] => 7
+)
+
+App\Model\Hooked Object
+(
+    [first] => Ada
+    [stored] => 3
+)
+
+App\Model\Ro Object
+(
+    [id] => 9
+    [name:protected] => n
+)
+
+App\Model\Suit Enum:string
+(
+    [name] => Hearts
+    [value] => h
+)
+
+App\Model\Plain Enum
+(
+    [name] => One
+)
+
+stdClass Object
+(
+    [p] => 1
+    [q] => Array
+        (
+            [0] => 1
+            [1] => 2
+        )
+
+)
+
+\App\Model\Child::__set_state(array(
+   'secret' => 1,
+   'kind' => 'base',
+   'next' => 
+  \App\Model\Base::__set_state(array(
+     'secret' => 1,
+     'kind' => 'base',
+     'next' => NULL,
+  )),
+   'secret' => 2,
+   'tags' => 
+  array (
+    0 => 'a',
+    1 => 'b',
+  ),
+))
+\App\Model\Dyn::__set_state(array(
+   'a' => 1,
+   'extra' => 'x',
+   '7' => 'seven',
+))
+\App\Model\Dbg::__set_state(array(
+   'hidden' => 5,
+))
+\App\Model\Hooked::__set_state(array(
+   'first' => 'Ada',
+   'full' => 'Ada L',
+   'stored' => 3,
+))
+\App\Model\Ro::__set_state(array(
+   'id' => 9,
+   'name' => 'n',
+))
+\App\Model\Suit::Hearts
+\App\Model\Plain::One
+(object) array(
+   'p' => 1,
+   'q' => 
+  array (
+    0 => 1,
+    1 => 2,
+  ),
+)
+Array
+(
+    [0] => App\Model\Child Object
+        (
+            [secret:App\Model\Base:private] => 1
+            [kind:protected] => base
+            [next] => App\Model\Base Object
+                (
+                    [secret:App\Model\Base:private] => 1
+                    [kind:protected] => base
+                    [next] => 
+                )
+
+            [secret:App\Model\Child:private] => 2
+            [tags] => Array
+                (
+                    [0] => a
+                    [1] => b
+                )
+
+        )
+
+    [k] => stdClass Object
+        (
+            [p] => 1
+            [q] => Array
+                (
+                    [0] => 1
+                    [1] => 2
+                )
+
+        )
+
+)
+array (
+  'x' => 
+  \App\Model\Dyn::__set_state(array(
+     'a' => 1,
+     'extra' => 'x',
+     '7' => 'seven',
+  )),
+  'y' => 
+  array (
+    0 => 
+    \App\Model\Suit::Hearts,
+  ),
+)

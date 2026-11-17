@@ -9402,6 +9402,20 @@ trait EmitLlvmBuiltins
         if ($lm === '__invoke' || \in_array($lm, ['bind', 'bindto', 'call', 'fromcallable', 'getcurrent'], true)) {
             return $this->biMethodExistsDynamic($args);
         }
+        $this->ensureMethodClassIds();
+        $ids = $this->methodClassIds[\strtolower($m)] ?? [];
+        if ($args[0]->type->kind !== Type::KIND_CELL) {
+            return $this->emitClassIdTest($args[0], $ids);
+        }
+        return $this->biMethodExistsErasedCell($args, $ids);
+    }
+
+    /**
+     * Build {@see $methodClassIds}: lower-cased method name => the ids of every class (enum, `Closure`)
+     * that has it, inherited included — what `method_exists($obj, 'm')` answers per class.
+     */
+    private function ensureMethodClassIds(): void
+    {
         if ($this->methodClassIds === null) {
             $idx = [];
             foreach ($this->reflMethodOwners() as $owner) {
@@ -9419,10 +9433,15 @@ trait EmitLlvmBuiltins
             }
             $this->methodClassIds = $idx;
         }
-        $ids = $this->methodClassIds[\strtolower($m)] ?? [];
-        if ($args[0]->type->kind !== Type::KIND_CELL) {
-            return $this->emitClassIdTest($args[0], $ids);
-        }
+    }
+
+    /**
+     * {@see biMethodExistsErased} over a cell subject: a class name or an object, decided at run time.
+     * @param Node[] $args
+     * @param int[] $ids
+     */
+    private function biMethodExistsErasedCell(array $args, array $ids): string
+    {
         $out = $this->emitNode($args[0]);
         $out .= $this->coerceToI64();
         $w = $this->lastValue;
@@ -11571,22 +11590,237 @@ trait EmitLlvmBuiltins
     /**
      * `__mc_ser_native($value)` — serialize() of the common shapes through the
      * native single-buffer writer ({@see \Compile\Mir\RuntimeLibrary::serEnc}).
-     * The answer is "" for a value it does not own (object, reference, enum);
-     * the PHP body in the stdlib always answers "" and is the bootstrap twin.
+     * Objects go through this module's per-class writers ({@see emitSerObjFn}).
+     * The answer is "" for a value it does not own (a reference, a closure, a
+     * class it bails on); the PHP body in the stdlib always answers "" and is
+     * the bootstrap twin.
      * @param Node[] $args
      */
     private function biSerNative(array $args): string
     {
         $this->jsonEncNeeds();
         $this->rt->needsSerEnc = true;
+        $this->rt->needsRc = true;
+        $this->needsSerObjFn = true;
         $out = $this->emitNode($args[0]);
         $out .= $this->boxToCell($args[0]->type);
         $cell = $this->lastValue;
         $reg = $this->ssa->allocReg();
-        $out .= '  ' . $reg . ' = call ptr @__mir_ser_encf(i64 ' . $cell . ")\n";
+        $out .= '  ' . $reg . ' = call ptr @__mir_ser_encf(i64 ' . $cell . ', ptr @'
+            . $this->mirHelperSym('__mir_sero') . ")\n";
         $out .= $this->cellBoxTempDrop($args[0]->type, $cell, $args[0]);
         $this->lastValue = $reg;
         $this->lastValueType = 'ptr';
+        return $out;
+    }
+
+    /**
+     * Whether the native serializer writes an object of `$cname` itself. It
+     * bails (and the PHP walker serializes the whole value) on a class whose
+     * form is not its slots: `__serialize` / `__sleep`, a date's `__mcJson`
+     * state, a resource, an erased #[TypeDef] slot, a raw buffer or a
+     * Throwable's trace slot.
+     */
+    private function serNativeOwns(string $cname, \Compile\Mir\ClassDef $cd): bool
+    {
+        if ($cd->isStruct || $cd->typeDefProp !== '') { return false; }
+        if ($this->resolveMethodClass($cname, '__serialize') !== ''
+            || $this->resolveMethodClass($cname, '__sleep') !== ''
+            || $this->resolveMethodClass($cname, '__mcJson') !== '') { return false; }
+        if ($this->classIsA($cname, 'Resource')) { return false; }
+        foreach ($cd->propertyNames as $pn) {
+            if (isset($cd->virtualProps[$pn])) { continue; }
+            $pt = $cd->propertyTypes[$pn] ?? null;
+            if ($pt === null) { return false; }
+            if ($this->isBufSlot($cd, $pn) || $this->isThrowableTraceSlot($cd, $pn)) { return false; }
+            $tdc = $pt->typeDefClass();
+            if ($tdc !== null && isset($this->classes[$tdc]) && $this->classes[$tdc]->typeDefProp !== '') { return false; }
+        }
+        return true;
+    }
+
+    /**
+     * `@__mir_sero(ptr slotp, ptr lp, ptr obj) -> i64`: the object arm of
+     * `@__mir_ser_app` for this module's classes — a switch on the class id
+     * whose arms each call one small per-class writer. 0 = not ours (the
+     * caller falls back to the PHP walker). The serializer's state (buffer,
+     * var-hash counter, seen map) is behind `slotp`; the caller has already
+     * counted and recorded this object.
+     */
+    private function emitSerObjFn(): string
+    {
+        $helpers = '';
+        $cases = '';
+        $arms = '';
+        $i = 0;
+        foreach ($this->classes as $cname => $cd) {
+            if (isset($this->enums[$cname]) || !$this->serNativeOwns((string)$cname, $cd)) { continue; }
+            $sym = '@' . $this->mirHelperSym('__mir_sero_' . (string)$cd->classId);
+            $helpers .= $this->emitSerObjClassFn($sym, (string)$cname, $cd);
+            $cases .= '    i64 ' . (string)$cd->classId . ', label %c' . (string)$i . "\n";
+            $arms .= 'c' . (string)$i . ":\n  %r" . (string)$i . ' = call i64 ' . $sym
+                . "(ptr %slotp, ptr %lp, ptr %o)\n  ret i64 %r" . (string)$i . "\n";
+            $i = $i + 1;
+        }
+        // An enum case is `E:<len>:"Enum:Case";`, one literal per case.
+        foreach ($this->enums as $ename => $ed) {
+            if ($ed->classId <= 0 || $ed->caseNames === []) { continue; }
+            $disp = $this->displayClassName((string)$ename);
+            $lits = [];
+            foreach ($ed->caseNames as $cn) {
+                $nm = $disp . ':' . $cn;
+                $lits[] = 'ptr ' . $this->litStr('E:' . (string)\strlen($nm) . ':"' . $nm . '";');
+            }
+            $n = (string)\count($lits);
+            $tbl = '@' . $this->mirHelperSym('__mir_sere_' . (string)$ed->classId);
+            $helpers .= $tbl . ' = internal constant [' . $n . ' x ptr] [' . \implode(', ', $lits) . "]\n";
+            $cases .= '    i64 ' . (string)$ed->classId . ', label %c' . (string)$i . "\n";
+            $s = (string)$i;
+            $arms .= 'c' . $s . ":\n"
+                . '  %og' . $s . " = getelementptr inbounds i8, ptr %o, i64 16\n"
+                . '  %ord' . $s . ' = load i64, ptr %og' . $s . "\n"
+                . '  %lp' . $s . ' = getelementptr inbounds [' . $n . ' x ptr], ptr ' . $tbl . ', i64 0, i64 %ord' . $s . "\n"
+                . '  %ls' . $s . ' = load ptr, ptr %lp' . $s . "\n"
+                . '  %ln' . $s . ' = getelementptr inbounds i8, ptr %ls' . $s . ", i64 -16\n"
+                . '  %ll' . $s . ' = load i64, ptr %ln' . $s . "\n"
+                . '  call void @__mir_json_ncat(ptr %slotp, ptr %lp, ptr %ls' . $s . ', i64 %ll' . $s . ")\n"
+                . "  ret i64 1\n";
+            $i = $i + 1;
+        }
+        return $helpers
+            . 'define linkonce_odr i64 @' . $this->mirHelperSym('__mir_sero') . "(ptr %slotp, ptr %lp, ptr %o) noinline {\nentry:\n"
+            . "  %di = load i64, ptr %o\n  %dz = icmp eq i64 %di, 0\n  br i1 %dz, label %none, label %desc\n"
+            . "desc:\n  %dp = inttoptr i64 %di to ptr\n  %cid = load i64, ptr %dp\n"
+            . "  switch i64 %cid, label %none [\n" . $cases . "  ]\n"
+            . "none:\n  ret i64 0\n" . $arms . "}\n\n";
+    }
+
+    /**
+     * One class's writer: `O:<len>:"<Class>":<count>:{`, then `s:N:"<key>";`
+     * and the slot's value per serialized slot (an uninitialized typed slot is
+     * left out, keys visibility-mangled), then the dynamic bag under string
+     * keys, then `}`. The count is a literal unless a slot may be
+     * uninitialized or the class has a bag. A slot is read as a BORROWED cell
+     * ({@see emitDeclaredPropCell}); a minted one is dropped after its write.
+     */
+    private function emitSerObjClassFn(string $sym, string $cname, \Compile\Mir\ClassDef $cd): string
+    {
+        $oldSsa = $this->ssa;
+        $oldLast = $this->lastValue;
+        $oldLastType = $this->lastValueType;
+        $oldClassId = $this->classIdReg;
+        $this->ssa = new \Compile\Mir\SsaBuilder();
+        $this->ssa->reset();
+        $this->rt->needsTagged = true;
+        $this->rt->needsRc = true;
+        $this->rt->needsStrRc = true;
+        $props = [];
+        $maybe = 0;
+        foreach ($cd->propertyNames as $pn) {
+            if (isset($cd->virtualProps[$pn])) { continue; }
+            $props[] = $pn;
+            if ($cd->initChecked($pn)) { $maybe = $maybe + 1; }
+        }
+        $disp = $this->displayClassName($cname);
+        $head = 'O:' . (string)\strlen($disp) . ':"' . $disp . '":';
+        $bag = $cd->usesBag();
+        $body = '';
+        $bagP = '';
+        if ($maybe === 0 && !$bag) {
+            $lit = $head . (string)\count($props) . ':{';
+            $body .= '  call void @__mir_json_ncat(ptr %slotp, ptr %lp, ptr ' . $this->litStr($lit) . ', i64 ' . (string)\strlen($lit) . ")\n";
+        } else {
+            $cnt = (string)(\count($props) - $maybe);
+            foreach ($props as $pn) {
+                if (!$cd->initChecked($pn)) { continue; }
+                $ini = $this->emitInitTest('%o', $cd, $pn, $cd->propertyOffset($pn), '', $body);
+                if ($ini === '') { $ini = 'true'; }
+                $z = $this->ssa->allocReg();
+                $c2 = $this->ssa->allocReg();
+                $body .= '  ' . $z . ' = zext i1 ' . $ini . " to i64\n"
+                    . '  ' . $c2 . ' = add i64 ' . $cnt . ', ' . $z . "\n";
+                $cnt = $c2;
+            }
+            if ($bag) {
+                $bg = $this->ssa->allocReg();
+                $bw = $this->ssa->allocReg();
+                $bz = $this->ssa->allocReg();
+                $bagP = $this->ssa->allocReg();
+                $bl = $this->ssa->allocReg();
+                $c3 = $this->ssa->allocReg();
+                $lHave = $this->ssa->allocLabel('sb.have');
+                $lJoin = $this->ssa->allocLabel('sb.join');
+                $lFrom = $this->ssa->allocLabel('sb.from');
+                $body .= '  ' . $bg . ' = getelementptr inbounds i8, ptr %o, i64 ' . (string)$cd->bagOffset() . "\n"
+                    . '  ' . $bw . ' = load i64, ptr ' . $bg . "\n"
+                    . '  ' . $bagP . ' = inttoptr i64 ' . $bw . " to ptr\n"
+                    . '  ' . $bz . ' = icmp eq i64 ' . $bw . ", 0\n"
+                    . '  br label %' . $lFrom . "\n" . $lFrom . ":\n"
+                    . '  br i1 ' . $bz . ', label %' . $lJoin . ', label %' . $lHave . "\n"
+                    . $lHave . ":\n"
+                    . '  ' . $bl . ' = call i64 @__mir_array_live_len(ptr ' . $bagP . ")\n"
+                    . '  br label %' . $lJoin . "\n" . $lJoin . ":\n"
+                    . '  ' . $c3 . ' = phi i64 [ 0, %' . $lFrom . ' ], [ ' . $bl . ', %' . $lHave . " ]\n";
+                $c4 = $this->ssa->allocReg();
+                $body .= '  ' . $c4 . ' = add i64 ' . $cnt . ', ' . $c3 . "\n";
+                $cnt = $c4;
+            }
+            $body .= '  call void @__mir_json_ncat(ptr %slotp, ptr %lp, ptr ' . $this->litStr($head) . ', i64 ' . (string)\strlen($head) . ")\n"
+                . '  call void @__mir_ser_cnt(ptr %slotp, ptr %lp, i64 ' . $cnt . ")\n";
+        }
+        foreach ($props as $pn) {
+            $pt = $cd->propertyTypes[$pn];
+            $lSkip = '';
+            if ($cd->initChecked($pn)) {
+                $ini = $this->emitInitTest('%o', $cd, $pn, $cd->propertyOffset($pn), '', $body);
+                if ($ini !== '') {
+                    $lSet = $this->ssa->allocLabel('so.set');
+                    $lSkip = $this->ssa->allocLabel('so.skip');
+                    $body .= '  br i1 ' . $ini . ', label %' . $lSet . ', label %' . $lSkip . "\n" . $lSet . ":\n";
+                }
+            }
+            $key = $this->mangledPropKey($cd, $pn);
+            $rec = 's:' . (string)\strlen($key) . ':"' . $key . '";';
+            $body .= '  call void @__mir_json_ncat(ptr %slotp, ptr %lp, ptr ' . $this->litStr($rec) . ', i64 ' . (string)\strlen($rec) . ")\n";
+            $body .= $this->emitDeclaredPropCell('%o', $cd, $pn, $pt, false);
+            $boxed = $this->lastValue;
+            $ok = $this->ssa->allocReg();
+            $body .= '  ' . $ok . ' = call i64 @__mir_ser_app(ptr %slotp, ptr %lp, i64 ' . $boxed . ")\n";
+            if ($this->propCellMode === 2) {
+                $body .= '  call void @__mir_cell_drop(i64 ' . $boxed . ")\n";
+            }
+            $good = $this->ssa->allocReg();
+            $lOk = $this->ssa->allocLabel('so.ok');
+            $body .= '  ' . $good . ' = icmp ne i64 ' . $ok . ", 0\n"
+                . '  br i1 ' . $good . ', label %' . $lOk . ", label %bail\n" . $lOk . ":\n";
+            if ($lSkip !== '') { $body .= '  br label %' . $lSkip . "\n" . $lSkip . ":\n"; }
+        }
+        if ($bag) {
+            $bz2 = $this->ssa->allocReg();
+            $bok = $this->ssa->allocReg();
+            $bgood = $this->ssa->allocReg();
+            $lHave = $this->ssa->allocLabel('sb.walk');
+            $lEnd = $this->ssa->allocLabel('sb.end');
+            if ($bagP === '') {
+                $bg = $this->ssa->allocReg();
+                $bw = $this->ssa->allocReg();
+                $bagP = $this->ssa->allocReg();
+                $body .= '  ' . $bg . ' = getelementptr inbounds i8, ptr %o, i64 ' . (string)$cd->bagOffset() . "\n"
+                    . '  ' . $bw . ' = load i64, ptr ' . $bg . "\n"
+                    . '  ' . $bagP . ' = inttoptr i64 ' . $bw . " to ptr\n";
+            }
+            $body .= '  ' . $bz2 . ' = icmp eq ptr ' . $bagP . ", null\n"
+                . '  br i1 ' . $bz2 . ', label %' . $lEnd . ', label %' . $lHave . "\n" . $lHave . ":\n"
+                . '  ' . $bok . ' = call i64 @__mir_ser_ents(ptr %slotp, ptr %lp, ptr ' . $bagP . ", i64 1)\n"
+                . '  ' . $bgood . ' = icmp ne i64 ' . $bok . ", 0\n"
+                . '  br i1 ' . $bgood . ', label %' . $lEnd . ", label %bail\n" . $lEnd . ":\n";
+        }
+        $out = 'define internal i64 ' . $sym . "(ptr %slotp, ptr %lp, ptr %o) {\nentry:\n" . $body
+            . "  call void @__mir_json_putc(ptr %slotp, ptr %lp, i64 125)\n  ret i64 1\nbail:\n  ret i64 0\n}\n\n";
+        $this->ssa = $oldSsa;
+        $this->lastValue = $oldLast;
+        $this->lastValueType = $oldLastType;
+        $this->classIdReg = $oldClassId;
         return $out;
     }
 

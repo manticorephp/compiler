@@ -1,0 +1,14 @@
+plain:0 plain:10
+proxy:add:1 proxy:add:11
+both:2 both:12
+proxy:add:3 proxy:add:13
+plain:4 plain:14
+both:5 both:15
+proxy:add:6 proxy:add:16
+plain:0 plain:10
+proxy:add:1 proxy:add:11
+both:2 both:12
+proxy:add:3 proxy:add:13
+plain:4 plain:14
+both:5 both:15
+proxy:add:6 proxy:add:16

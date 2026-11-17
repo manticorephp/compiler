@@ -335,6 +335,8 @@ final class LowerFromAst implements Pass
     /** The program calls `function_exists()` with a NON-literal argument, so it
      *  needs the runtime name table rather than the compile-time fold. */
     private bool $sawDynFnExists = false;
+    /** The module {@see lowerTrampTooFew} last lowered the shared arity error into. */
+    private ?Module $trampTooFewFor = null;
     /** A `get_defined_functions()` call was lowered ({@see definedFunctionsSource}). */
     private bool $sawGetDefinedFns = false;
     /** @var array<string, bool> lowercased method names any `[$x, 'name']` literal spells, static receiver included */
@@ -1370,8 +1372,8 @@ final class LowerFromAst implements Pass
         }
 
         // serialize()'s object arm — same point and pattern as __mir_dump_object,
-        // and for the same reason: one `instanceof` arm per class, written from
-        // the now-complete class table.
+        // written once the class table is complete (it asks whether any class
+        // declares __serialize); the per-class writers are native IR.
         if ($this->includeSerialize) {
             $serProg = \Parser\Parser::parseSource("<?php\n" . $this->serObjectSrc());
             foreach ($serProg->statements as $sstmt) {
@@ -1422,12 +1424,59 @@ final class LowerFromAst implements Pass
             }
             \Compile\Mir\Passes\TrampolineSynth::$bindByName = $module->namedSpread;
             \Compile\Mir\Passes\TrampolineSynth::$ctorCall = true;
+            // The parameter-default factories come first: a trampoline whose callee
+            // can take its defaults explicitly calls them instead of carrying an arm
+            // per arity ({@see TrampolineSynth::arms}). Declared now, lowered with
+            // the other factories once the constant tables are complete (below).
+            $defaultFactories = [];
+            foreach ($this->synthParamDefaultFactories($module) as $decl) {
+                $this->declareFn($decl->name, $decl);
+                $this->pendingSynthFns[] = $decl;
+                $defaultFactories[$decl->name] = true;
+            }
+            // A callee that counts its arguments must see the count it was called
+            // with, which only an arm per arity passes. The parser records it per
+            // method (MethodDecl::$countsArgs, from the body's tokens, lazy or not);
+            // a trait method counts for the class it is mixed into, under its own
+            // name and every alias.
+            $countsArgs = [];
+            foreach ($module->classes as $cd) {
+                $cdecl = $this->classDecls[$cd->name] ?? null;
+                if ($cdecl === null) { continue; }
+                $lc = \strtolower(\ltrim($cd->name, '\\'));
+                foreach ($cdecl->methods as $cm) {
+                    if ($cm->countsArgs) { $countsArgs[$lc . '::' . \strtolower($cm->name)] = true; }
+                }
+                foreach ($this->usedTraitsFlat($cdecl) as $tn) {
+                    $tdecl = $this->traitTable[\ltrim($tn, '\\')] ?? null;
+                    if ($tdecl === null) { continue; }
+                    foreach ($tdecl->methods as $tm) {
+                        if ($tm->countsArgs) { $countsArgs[$lc . '::' . \strtolower($tm->name)] = true; }
+                    }
+                }
+                foreach ($this->effectiveAdaptations($cdecl) as $ad) {
+                    if ($ad->alias === '') { continue; }
+                    $from = $ad->trait !== '' ? [$ad->trait] : $this->usedTraitsFlat($cdecl);
+                    foreach ($from as $tn) {
+                        $tdecl = $this->traitTable[\ltrim($tn, '\\')] ?? null;
+                        if ($tdecl === null) { continue; }
+                        foreach ($tdecl->methods as $tm) {
+                            if ($tm->countsArgs && \strcasecmp($tm->name, $ad->method) === 0) {
+                                $countsArgs[$lc . '::' . \strtolower($ad->alias)] = true;
+                            }
+                        }
+                    }
+                }
+            }
+            \Compile\Mir\Passes\TrampolineSynth::$defaultFactories = $defaultFactories;
+            \Compile\Mir\Passes\TrampolineSynth::$countsArgs = $countsArgs;
             $trampSrc = '';
             foreach ($module->classes as $cd) {
                 $trampSrc .= \Compile\Mir\Passes\TrampolineSynth::sourceFor($cd);
                 $trampSrc .= \Compile\Mir\Passes\ReflectSynth::sourceFor($cd);
             }
             if ($trampSrc !== '') {
+                $this->lowerTrampTooFew($module);
                 $trampProg = \Parser\Parser::parseSource("<?php\n" . $trampSrc);
                 foreach ($trampProg->statements as $tstmt) {
                     if ($tstmt->kind !== 'Function') { continue; }
@@ -1449,10 +1498,6 @@ final class LowerFromAst implements Pass
             // The declaration still has to be registered NOW: the params pre-pass
             // right below reads `$this->fnDecls`.
             foreach ($this->synthAttrFactories($module) as $decl) {
-                $this->declareFn($decl->name, $decl);
-                $this->pendingSynthFns[] = $decl;
-            }
-            foreach ($this->synthParamDefaultFactories($module) as $decl) {
                 $this->declareFn($decl->name, $decl);
                 $this->pendingSynthFns[] = $decl;
             }
@@ -1748,6 +1793,7 @@ final class LowerFromAst implements Pass
                     $fn, $mm->requiredParams(), \count($mm->params), $void, $variadic);
             }
             if ($fnTrampSrc !== '') {
+                $this->lowerTrampTooFew($module);
                 $prog = \Parser\Parser::parseSource("<?php\n" . $fnTrampSrc);
                 foreach ($prog->statements as $s) {
                     if ($s->kind !== 'Function') { continue; }
@@ -1862,11 +1908,14 @@ final class LowerFromAst implements Pass
             if (!$this->includeReflection) {
                 \Compile\Mir\Passes\TrampolineSynth::$bindByName = $module->namedSpread;
                 \Compile\Mir\Passes\TrampolineSynth::$ctorCall = false;
+                // No default factories outside reflection: every trampoline keeps its arms.
+                \Compile\Mir\Passes\TrampolineSynth::$defaultFactories = [];
                 $dynamicTrampSrc = '';
                 foreach ($module->classes as $cd) {
                     $dynamicTrampSrc .= \Compile\Mir\Passes\TrampolineSynth::sourceFor($cd);
                 }
                 if ($dynamicTrampSrc !== '') {
+                    $this->lowerTrampTooFew($module);
                     $dynamicTrampProg = \Parser\Parser::parseSource("<?php\n" . $dynamicTrampSrc);
                     foreach ($dynamicTrampProg->statements as $dstmt) {
                         if ($dstmt->kind !== 'Function') { continue; }
@@ -2735,9 +2784,32 @@ final class LowerFromAst implements Pass
     }
 
     /**
-     * One `__mc_cdoc_<C>(): mixed` per class: `['c' => [doc, line], 'm' => [lower-cased
-     * method => [doc, line]], 'p' => [property => [doc]]]`, `doc` being the raw
-     * docblock or false. What `getDocComment()` / `getStartLine()` read.
+     * Lower {@see TrampolineSynth::tooFewSource} into `$module` once, as a coalescing prelude-style
+     * body: every trampoline's arity guard calls it, and a library and an application that both
+     * carry trampolines must not each define it strongly.
+     */
+    private function lowerTrampTooFew(Module $module): void
+    {
+        if ($this->trampTooFewFor === $module) { return; }
+        $this->trampTooFewFor = $module;
+        $prog = \Parser\Parser::parseSource("<?php\n" . \Compile\Mir\Passes\TrampolineSynth::tooFewSource());
+        foreach ($prog->statements as $s) {
+            if ($s->kind !== 'Function') { continue; }
+            $this->declareFn($s->decl->name, $s->decl);
+            $fn = $this->lowerFunction($s->decl);
+            $fn->isPrelude = true;
+            $module->addFunction($fn);
+        }
+    }
+
+    /**
+     * One `__mc_cdoc_<C>(): mixed` per class: `['u' => [trait, …], 'r' => readonly, 'c' => [doc, line, end],
+     * 'm' => [lower-cased method => [doc, line, end]], 'p' => [property => [doc, line, end]]]`, `doc`
+     * being the raw docblock or false. What `getDocComment()` / `getStartLine()` read.
+     *
+     * The value is constant data, so the body is not code that builds it: it is one serialized
+     * string literal decoded by the generic native decoder (`__mc_unser_native`). Built element by
+     * element it was ~15 KB of IR a class (57 MB on Laravel).
      *
      * @return \Parser\Ast\FunctionDecl[]
      */
@@ -2749,40 +2821,33 @@ final class LowerFromAst implements Pass
             if (!isset($this->classDecls[$cd->name])) { continue; }
             $decl = $this->classDecls[$cd->name];
             $sp = new \Parser\Ast\Span(0, 0);
-            $methods = [];
+            $methods = '';
+            $nm = 0;
             foreach ($decl->methods as $md) {
-                $methods[] = new \Parser\Ast\ArrayElement(
-                    \Parser\Ast\Expr::string(\strtolower($md->name), $sp),
-                    $this->docEntry($md->docComment, $md->span->line, $sp, $md->endLine));
+                $methods .= self::serStr(\strtolower($md->name)) . self::serDoc($md->docComment, $md->span->line, $md->endLine);
+                $nm = $nm + 1;
             }
-            $props = [];
+            $props = '';
+            $np = 0;
             foreach ($decl->properties as $pd) {
-                $props[] = new \Parser\Ast\ArrayElement(
-                    \Parser\Ast\Expr::string($pd->name, $sp),
-                    $this->docEntry($pd->docComment, $pd->span->line, $sp));
+                $props .= self::serStr($pd->name) . self::serDoc($pd->docComment, $pd->span->line);
+                $np = $np + 1;
             }
-            $traitElems = [];
+            $traits = '';
             $traitNames = [];
             foreach ($decl->uses as $tn) {
                 $tn = \ltrim($tn, '\\');
-                $traitElems[] = new \Parser\Ast\ArrayElement(null, \Parser\Ast\Expr::string($tn, $sp));
+                $traits .= 'i:' . (string)\count($traitNames) . ';' . self::serStr($tn);
                 $traitNames[] = $tn;
             }
             $module->classTraitNames[$cd->name] = $traitNames;
-            $elems = [
-                new \Parser\Ast\ArrayElement(\Parser\Ast\Expr::string('u', $sp),
-                    \Parser\Ast\Expr::arrayLit($traitElems, $sp)),
-                new \Parser\Ast\ArrayElement(\Parser\Ast\Expr::string('r', $sp),
-                    \Parser\Ast\Expr::bool($decl->isReadonly, $sp)),
-                new \Parser\Ast\ArrayElement(\Parser\Ast\Expr::string('c', $sp),
-                    $this->docEntry($decl->docComment, $decl->span->line, $sp)),
-                new \Parser\Ast\ArrayElement(\Parser\Ast\Expr::string('m', $sp),
-                    \Parser\Ast\Expr::arrayLit($methods, $sp)),
-                new \Parser\Ast\ArrayElement(\Parser\Ast\Expr::string('p', $sp),
-                    \Parser\Ast\Expr::arrayLit($props, $sp)),
-            ];
+            $blob = 'a:5:{' . self::serStr('u') . 'a:' . (string)\count($traitNames) . ':{' . $traits . '}'
+                . self::serStr('r') . 'b:' . ($decl->isReadonly ? '1' : '0') . ';'
+                . self::serStr('c') . self::serDoc($decl->docComment, $decl->span->line)
+                . self::serStr('m') . 'a:' . (string)$nm . ':{' . $methods . '}'
+                . self::serStr('p') . 'a:' . (string)$np . ':{' . $props . '}}';
             $body = new \Parser\Ast\Block([
-                \Parser\Ast\Stmt::return_(\Parser\Ast\Expr::arrayLit($elems, $sp), $sp),
+                \Parser\Ast\Stmt::return_(\Parser\Ast\Expr::call('__mc_unser_native', [\Parser\Ast\Expr::string($blob, $sp)], $sp), $sp),
             ]);
             $out[] = new \Parser\Ast\FunctionDecl(
                 \Compile\Mir\Passes\ReflectSynth::docFn($cd->name), [], 'mixed', $body, $sp);
@@ -2790,15 +2855,17 @@ final class LowerFromAst implements Pass
         return $out;
     }
 
-    /** `[doc-or-false, line, end-line]` as an array literal (end 0 = the start). */
-    private function docEntry(?string $doc, int $line, \Parser\Ast\Span $sp, int $end = 0): \Parser\Ast\Expr
+    /** php's serialize() of a string. */
+    private static function serStr(string $s): string
     {
-        $docExpr = $doc === null ? \Parser\Ast\Expr::bool(false, $sp) : \Parser\Ast\Expr::string($doc, $sp);
-        return \Parser\Ast\Expr::arrayLit([
-            new \Parser\Ast\ArrayElement(null, $docExpr),
-            new \Parser\Ast\ArrayElement(null, \Parser\Ast\Expr::int($line, $sp)),
-            new \Parser\Ast\ArrayElement(null, \Parser\Ast\Expr::int($end > 0 ? $end : $line, $sp)),
-        ], $sp);
+        return 's:' . (string)\strlen($s) . ':"' . $s . '";';
+    }
+
+    /** php's serialize() of `[doc-or-false, line, end-line]` (end 0 = the start). */
+    private static function serDoc(?string $doc, int $line, int $end = 0): string
+    {
+        return 'a:3:{i:0;' . ($doc === null ? 'b:0;' : self::serStr($doc)) . 'i:1;i:' . (string)$line
+            . ';i:2;i:' . (string)($end > 0 ? $end : $line) . ';}';
     }
 
     /**

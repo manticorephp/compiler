@@ -249,6 +249,199 @@ final class InferTypes implements Pass
         return isset($set[$kind]);
     }
 
+    /**
+     * Semi-naive module scans: per body, the nodes a scan's per-node step acts
+     * on, in the pre-order a full `Walk::children` recursion visits them, under
+     * three tags filled by ONE walk ({@see collectScanNodes}):
+     *
+     *   `callsite`  calls of every flavour (function, method, static, `new`,
+     *               invoke) and property stores;
+     *   `stores`    local and element stores;
+     *   `byref`     the calls, the stores, `foreach`, references and closures.
+     *
+     * A scan whose per-node step reads only the node, its subtree and live
+     * tables (types, params, the class hierarchy) replays the step over a list
+     * instead of walking every node of every body again: within a run, bodies
+     * change STRUCTURE only where inference re-ran or an entry store was
+     * planted, while types move everywhere — and types are read live, never
+     * cached. A list is valid while the body is the same object and its
+     * {@see bodyGen} has not moved since it was taken.
+     *
+     * `MANTICORE_SCAN_VERIFY=1` re-collects every list on every use and aborts
+     * on any difference, and each replaying scan also runs its original walk
+     * and aborts when the aggregated facts differ — the regression guard for a
+     * body mutation that forgets {@see touchBody}, or a per-node step that
+     * starts reading traversal context.
+     * @var array<string, Node[]> "tag|fn" → nodes
+     */
+    private array $scanNodes = [];
+    /** @var array<string, Node> fn → the body its lists were taken from */
+    private array $scanNodesBody = [];
+    /** @var array<string, int> fn → the {@see bodyGen} its lists were taken at */
+    private array $scanNodesGen = [];
+    /** fn name → bumped on every structural change to its body.
+     *  @var array<string, int> */
+    private array $bodyGen = [];
+    /** node kind → bit set of its tags: 1 callsite, 2 stores, 4 byref.
+     *  @var array<string, int> */
+    private array $scanKindTags = [];
+    private ?bool $scanVerify = null;
+
+    private function touchBody(string $fnName): void
+    {
+        $this->bodyGen[$fnName] = ($this->bodyGen[$fnName] ?? 0) + 1;
+    }
+
+    private function resetScanNodes(): void
+    {
+        $this->scanNodes = [];
+        $this->scanNodesBody = [];
+        $this->scanNodesGen = [];
+        $this->bodyGen = [];
+    }
+
+    private function scanVerifyOn(): bool
+    {
+        if ($this->scanVerify === null) { $this->scanVerify = \getenv('MANTICORE_SCAN_VERIFY') === '1'; }
+        return $this->scanVerify;
+    }
+
+    /**
+     * `name|class` for every pair of a two-level set, in order — what
+     * {@see scanSetDiff} compares a nested set by.
+     * @param array<string, array<string, bool>> $m
+     * @return array<string, bool>
+     */
+    private static function flatSet(array $m): array
+    {
+        $out = [];
+        foreach ($m as $k => $inner) {
+            foreach ($inner as $k2 => $unused) { $out[(string)$k . '|' . (string)$k2] = true; }
+        }
+        return $out;
+    }
+
+    /** The `$tag` list of `$fn`'s body ({@see $scanNodes}). @return Node[] */
+    private function bodyNodesOf(FunctionDef $fn, string $tag): array
+    {
+        $name = $fn->name;
+        $gen = $this->bodyGen[$name] ?? 0;
+        $key = $tag . '|' . $name;
+        if (isset($this->scanNodesBody[$name]) && $this->scanNodesBody[$name] === $fn->body
+            && $this->scanNodesGen[$name] === $gen) {
+            $cached = $this->scanNodes[$key];
+            if ($this->scanVerifyOn()) {
+                $c = [];
+                $s = [];
+                $b = [];
+                $this->collectScanNodes($fn->body, $c, $s, $b);
+                $fresh = $tag === 'callsite' ? $c : ($tag === 'stores' ? $s : $b);
+                $n = \count($fresh);
+                $same = $n === \count($cached);
+                for ($i = 0; $same && $i < $n; $i = $i + 1) { $same = $fresh[$i] === $cached[$i]; }
+                if (!$same) {
+                    throw new \RuntimeException('MIR.infer: MANTICORE_SCAN_VERIFY: stale ' . $tag . ' node list for '
+                        . $name . ' (' . (string)\count($cached) . ' cached, ' . (string)$n
+                        . ' now) — a body mutation did not call touchBody()');
+                }
+            }
+            return $cached;
+        }
+        $c = [];
+        $s = [];
+        $b = [];
+        $this->collectScanNodes($fn->body, $c, $s, $b);
+        $this->scanNodes['callsite|' . $name] = $c;
+        $this->scanNodes['stores|' . $name] = $s;
+        $this->scanNodes['byref|' . $name] = $b;
+        $this->scanNodesBody[$name] = $fn->body;
+        $this->scanNodesGen[$name] = $gen;
+        return $tag === 'callsite' ? $c : ($tag === 'stores' ? $s : $b);
+    }
+
+    /**
+     * @param Node[] $calls
+     * @param Node[] $stores
+     * @param Node[] $byref
+     */
+    private function collectScanNodes(Node $n, array &$calls, array &$stores, array &$byref): void
+    {
+        if ($this->scanKindTags === []) {
+            $this->scanKindTags = [
+                Node::KIND_CALL => 5, Node::KIND_METHOD_CALL => 5, Node::KIND_STATIC_CALL => 5,
+                Node::KIND_NEW_OBJ => 5, Node::KIND_INVOKE => 5, Node::KIND_STORE_PROPERTY => 1,
+                Node::KIND_STORE_LOCAL => 6, Node::KIND_STORE_ELEMENT => 6,
+                Node::KIND_FOREACH => 4, Node::KIND_REF_ADDR => 4, Node::KIND_REF_CELL => 4,
+                Node::KIND_CLOSURE => 4,
+            ];
+        }
+        $t = $this->scanKindTags[$n->kind] ?? 0;
+        if ($t !== 0) {
+            if (($t & 1) !== 0) { $calls[] = $n; }
+            if (($t & 2) !== 0) { $stores[] = $n; }
+            if (($t & 4) !== 0) { $byref[] = $n; }
+        }
+        foreach (Walk::children($n) as $c) { $this->collectScanNodes($c, $calls, $stores, $byref); }
+    }
+
+    /**
+     * '' when two scan maps hold the same keys in the same order with the same
+     * Type objects; else the first difference.
+     * @param array<string, Type> $a
+     * @param array<string, Type> $b
+     */
+    private static function scanTypeMapDiff(string $what, array $a, array $b): string
+    {
+        $ka = \array_keys($a);
+        $kb = \array_keys($b);
+        $n = \count($ka);
+        if ($n !== \count($kb)) {
+            return ' ' . $what . ': ' . (string)$n . ' keys walked, ' . (string)\count($kb) . ' replayed;';
+        }
+        for ($i = 0; $i < $n; $i = $i + 1) {
+            $k = (string)$ka[$i];
+            if ($k !== (string)$kb[$i]) { return ' ' . $what . ': key #' . (string)$i . ' ' . $k . ' vs ' . (string)$kb[$i] . ';'; }
+            if ($a[$k] !== $b[$k]) { return ' ' . $what . '[' . $k . ']: ' . $a[$k]->exactString() . ' vs ' . $b[$k]->exactString() . ';'; }
+        }
+        return '';
+    }
+
+    /**
+     * The same for a map of strings.
+     * @param array<string, string> $a
+     * @param array<string, string> $b
+     */
+    private static function scanStrMapDiff(string $what, array $a, array $b): string
+    {
+        $ka = \array_keys($a);
+        $kb = \array_keys($b);
+        $n = \count($ka);
+        if ($n !== \count($kb)) {
+            return ' ' . $what . ': ' . (string)$n . ' keys walked, ' . (string)\count($kb) . ' replayed;';
+        }
+        for ($i = 0; $i < $n; $i = $i + 1) {
+            $k = (string)$ka[$i];
+            if ($k !== (string)$kb[$i]) { return ' ' . $what . ': key #' . (string)$i . ' ' . $k . ' vs ' . (string)$kb[$i] . ';'; }
+            if ($a[$k] !== $b[$k]) { return ' ' . $what . '[' . $k . ']: ' . $a[$k] . ' vs ' . $b[$k] . ';'; }
+        }
+        return '';
+    }
+
+    /**
+     * The same for a set (only the keys and their order count).
+     * @param array<string, bool> $a
+     * @param array<string, bool> $b
+     */
+    private static function scanSetDiff(string $what, array $a, array $b): string
+    {
+        $sa = [];
+        foreach ($a as $k => $unused) { $sa[(string)$k] = '1'; }
+        $sb = [];
+        foreach ($b as $k => $unused) { $sb[(string)$k] = '1'; }
+        return self::scanStrMapDiff($what, $sa, $sb);
+    }
+
+
     /** @param array<string, bool> $keys */
     private function bodyHasAnyOf(FunctionDef $fn, array $keys): bool
     {
@@ -314,6 +507,45 @@ final class InferTypes implements Pass
     private string $callArgScanFn = '';
     /** @var array<string, int> */
     private array $callArgScanParams = [];
+    /** @var array<string, string[]> "fn#" → its candidate keys in `$cand` order, or null to scan `$cand` */
+    private ?array $callArgCandByFn = null;
+
+    /**
+     * Each candidate key under every prefix of it that ends in `#`, in `$cand`
+     * order: the keys `str_starts_with($ck, $pre)` selects for a `$pre` that
+     * ends in `#`, without a pass over every candidate per spread argument.
+     * @param array<string, bool> $cand
+     * @return array<string, string[]>
+     */
+    private static function candPrefixIndex(array $cand): array
+    {
+        $idx = [];
+        foreach ($cand as $ck => $unused) {
+            $ck = (string)$ck;
+            $p = \strpos($ck, '#');
+            while ($p !== false) {
+                $idx[\substr($ck, 0, $p + 1)][] = $ck;
+                $p = \strpos($ck, '#', $p + 1);
+            }
+        }
+        return $idx;
+    }
+
+    /**
+     * The candidate keys that start with `$pre` (which ends in `#`), in `$cand` order.
+     * @param array<string, bool> $cand
+     * @return string[]
+     */
+    private function candKeysWithPrefix(array $cand, string $pre): array
+    {
+        if ($this->callArgCandByFn !== null) { return $this->callArgCandByFn[$pre] ?? []; }
+        $out = [];
+        foreach ($cand as $ck => $unused) {
+            $ck = (string)$ck;
+            if (\str_starts_with($ck, $pre)) { $out[] = $ck; }
+        }
+        return $out;
+    }
 
     private ?\Compile\Mir\DependencyIndex $callGraph = null;
 
@@ -521,6 +753,7 @@ final class InferTypes implements Pass
         $this->declaredReturns = $module->declaredReturnTypes;
         $this->callGraph = null;
         $this->bodyKinds = [];
+        $this->resetScanNodes();
         $all = $seed;
         foreach ($seed as $name => $unused) {
             foreach ($this->depGraph($module)->neighbors($name) as $nb => $alsoUnused) { $all[$nb] = true; }
@@ -1025,6 +1258,7 @@ final class InferTypes implements Pass
         $this->callGraph = null;
         $this->rescanTouched = [];
         $this->bodyKinds = [];
+        $this->resetScanNodes();
         $this->classes = $module->classes;
         $this->interfaceAncestors = $module->interfaceAncestors;
         $this->declarersIdx = [];
@@ -2013,6 +2247,26 @@ final class InferTypes implements Pass
      */
     private function collectCallArgElems(Node $n, array $cand, array &$observed, array &$conflict, array &$assocKey, array &$shape, array &$sawCell, array &$erasedArg): void
     {
+        $this->callArgElemsAt($n, $cand, $observed, $conflict, $assocKey, $shape, $sawCell, $erasedArg);
+        foreach (Walk::children($n) as $ch) {
+            $this->collectCallArgElems($ch, $cand, $observed, $conflict, $assocKey, $shape, $sawCell, $erasedArg);
+        }
+    }
+
+    /**
+     * The per-node step of {@see collectCallArgElems}: one call site. Reads the
+     * node, its arguments and live tables only, so it replays exactly over a
+     * cached pre-order list of call nodes ({@see bodyNodesOf}).
+     * @param array<string,bool> $cand
+     * @param array<string,Type> $observed
+     * @param array<string,bool> $conflict
+     * @param array<string,Type> $assocKey
+     * @param array<string,string> $shape
+     * @param array<string,bool> $sawCell
+     * @param array<string,bool> $erasedArg
+     */
+    private function callArgElemsAt(Node $n, array $cand, array &$observed, array &$conflict, array &$assocKey, array &$shape, array &$sawCell, array &$erasedArg): void
+    {
         // Resolve the target function name + a param-index base for each call
         // flavor. A free/static call's arg `i` maps to param `i`; an INSTANCE
         // method's args are offset by 1 (param 0 is `this`). A method whose
@@ -2055,9 +2309,8 @@ final class InferTypes implements Pass
                     foreach ([$fnName, $lsbFn] as $sf) {
                         if ($sf === '') { continue; }
                         $pre = $sf . '#';
-                        foreach ($cand as $ck => $_) {
-                            $ck = (string)$ck;
-                            if (\str_starts_with($ck, $pre) && (int)\substr($ck, \strlen($pre)) >= $base + $i) {
+                        foreach ($this->candKeysWithPrefix($cand, $pre) as $ck) {
+                            if ((int)\substr($ck, \strlen($pre)) >= $base + $i) {
                                 $conflict[$ck] = true;
                                 $erasedArg[$ck] = true;
                                 unset($observed[$ck]);
@@ -2192,9 +2445,6 @@ final class InferTypes implements Pass
                 if (!isset($observed[$key])) { $observed[$key] = $elem; }
                 elseif (!$this->sameElemShape($observed[$key], $elem)) { unset($observed[$key]); $conflict[$key] = true; }
             }
-        }
-        foreach (Walk::children($n) as $ch) {
-            $this->collectCallArgElems($ch, $cand, $observed, $conflict, $assocKey, $shape, $sawCell, $erasedArg);
         }
     }
 
