@@ -3821,6 +3821,9 @@ function build_compile_module(
         $emit = new \Compile\Mir\Passes\EmitLlvm();
         $emit->emitLibrary = $emitLibrary;
         $emit->emitFiberAsm = $emitLibrary && \basename($output) === "manticore_stdlib.o";
+        // A manifest build clears the source file, so without a name every library shared one helper token
+        // and two libraries' hidden helpers (`__mc_spread_badkey_m<token>`) collided at link time.
+        $emit->libIdentity = \basename($output);
         // The stdlib (a library that imports no stdlib) exports the dynamic-call
         // thunks every program used to build for itself; anything else uses them.
         $emit->exportDynf = $emitLibrary && !$withStdlib;

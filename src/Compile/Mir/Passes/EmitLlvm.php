@@ -984,7 +984,7 @@ final class EmitLlvm implements EmitVisitor
         // program (shared object reuse), and `app` is not hex, so it can never
         // equal a library's token.
         $this->modToken = $this->emitLibrary
-            ? \dechex($this->fnvHash64($module->sourceFile . '|lib'))
+            ? \dechex($this->fnvHash64(($module->sourceFile !== '' ? $module->sourceFile : $this->libIdentity) . '|lib'))
             : 'app';
         $this->vdSyms = [];
         $this->vdExtraBodies = '';
@@ -2567,6 +2567,8 @@ final class EmitLlvm implements EmitVisitor
      * pinned through the optimizer by `@llvm.compiler.used`.
      */
     private string $modToken = '';
+    /** A library's name for {@see $modToken} when its module has no source file (every manifest build): the output's basename. */
+    public string $libIdentity = '';
 
     /** A module-local helper's symbol, tagged with {@see $modToken}. */
     protected function mirHelperSym(string $base): string
