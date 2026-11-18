@@ -1,0 +1,5 @@
+T
+T
+null: b(): Argument #1 ($x) must be of type bool, null given
+array: b(): Argument #1 ($x) must be of type bool, array given
+object: b(): Argument #1 ($x) must be of type bool, Foo given

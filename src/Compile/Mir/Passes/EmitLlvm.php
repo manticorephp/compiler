@@ -3354,6 +3354,14 @@ final class EmitLlvm implements EmitVisitor
 
     private function emitNode(Node $n): string
     {
+        if ($this->trampArgNodes !== []) {
+            $ti = $this->trampArgIndex($n);
+            if ($ti >= 0) {
+                $this->lastValue = $this->trampArgRegs[$ti];
+                $this->lastValueType = 'i64';
+                return '';
+            }
+        }
         if ($this->preEvalNodes !== []) {
             $pi = $this->preEvalIndex($n);
             if ($pi >= 0) {

@@ -843,6 +843,7 @@ trait EmitLlvmObjects
             $mask = $this->sigs->refParams[$ctorClass . '____construct'] ?? [];
             $spreadPack = '';
             $ai = 0;
+            $out .= $this->trampBindPrepare($n->args, $mask, 1, $ptypes, true, $ctorClass . '____construct');
             foreach ($n->args as $a) {
                 // `new C(...$arr)`: expand the pack across the ctor's remaining
                 // params (param 0 is `$this`). Without an arm here the Spread_
@@ -8873,6 +8874,7 @@ trait EmitLlvmObjects
         $ai = 0;
         $refSlotDrops = '';
         $spreadPack = '';
+        $out .= $this->trampBindPrepare($this->faCallArgs($target, $n->args), $mask, 0, $ptypes, true, $cls . '__' . $n->method);
         foreach ($this->faCallArgs($target, $n->args) as $a) {
             // `Cls::m(...$arr)`: expand across the method's declared params
             // (a static call has no implicit `$this`, so arg `ai` is param `ai`).
@@ -8978,6 +8980,8 @@ trait EmitLlvmObjects
             }
             $ai = $ai + 1;
         }
+        $this->trampArgNodes = [];
+        $this->trampArgRegs = [];
         $out .= $this->surplusArgEffects($target, $n->args);
         // Catch-all default pad (mirrors emitMethodCall); a static call is
         // usually lower-filled, but an unresolved-at-lowering callee may
@@ -9557,7 +9561,13 @@ trait EmitLlvmObjects
             [$fsym, $cnt] = $fill;
             $buf = $this->ssa->allocReg();
             $out = '  ' . $buf . ' = alloca [' . (string)\max(1, $cnt) . " x i64]\n";
-            $out .= '  call void ' . $fsym . '(ptr ' . $tail[0] . ', ptr ' . $buf . ")\n";
+            if ($fill[2] !== '') {
+                // The fill is the spread binder alone: called here with its own descriptor.
+                $mr = $this->ssa->allocReg();
+                $out .= '  ' . $mr . ' = call i64 ' . $fsym . '(ptr ' . $tail[0] . ', ptr ' . $fill[2] . ', ptr ' . $buf . ', ' . $fill[3] . ")\n";
+            } else {
+                $out .= '  call void ' . $fsym . '(ptr ' . $tail[0] . ', ptr ' . $buf . ")\n";
+            }
             for ($i = 0; $i < $cnt; $i = $i + 1) {
                 $gp = $this->ssa->allocReg();
                 $rg = $this->ssa->allocReg();
@@ -9574,7 +9584,7 @@ trait EmitLlvmObjects
         return $out;
     }
 
-    /** @var array<string, array{0: string, 1: int}|null> spread-fill shape => [symbol, register count], null when it does not close */
+    /** @var array<string, array{0: string, 1: int, 2: string, 3: string}|null> spread-fill shape => [symbol, register count, binder descriptor, binder site], null when it does not close */
     private array $spreadFillSyms = [];
 
     /**
@@ -9584,7 +9594,7 @@ trait EmitLlvmObjects
      *
      * @param array<int, Type> $ptypes
      * @param array<int, bool> $tmask
-     * @return array{0: string, 1: int}|null
+     * @return array{0: string, 1: int, 2: string, 3: string}|null
      */
     private function spreadFillHelper(string $sym, int $first, array $ptypes, array $tmask, ?Type $elemType): ?array
     {
@@ -9612,7 +9622,9 @@ trait EmitLlvmObjects
         $this->cf = new ControlFlow();
         $this->arena = new ArenaContext();
 
-        [$body, $regs] = $this->emitSpreadFill('%arr', $first, $ptypes, $tmask, $elemType, $sym);
+        [$body, $regs] = $this->emitSpreadFill('%arr', $first, $ptypes, $tmask, $elemType, $sym, null, '%out');
+        $filled = $this->spreadBindFilled;
+        $direct = $this->spreadBindDirect;
         foreach ($regs as $i => $rg) {
             $gp = $this->ssa->allocReg();
             $body .= '  ' . $gp . ' = getelementptr inbounds i64, ptr %out, i64 ' . (string)$i . "\n";
@@ -9622,9 +9634,11 @@ trait EmitLlvmObjects
         $result = null;
         // A by-reference parameter is filled with the address of a slot of this frame,
         // which would not outlive the helper.
-        if ($this->irIsClosed($body) && !\str_contains($body, ' = alloca ')) {
+        if ($direct !== null) {
+            $result = [$this->spreadBindHelper(), $filled, $direct[0], $direct[1]];
+        } elseif ($this->irIsClosed($body) && !\str_contains($body, ' = alloca ')) {
             $this->dynamicMethodHelpers['spfill|' . $key] = 'define internal void ' . $fsym . "(ptr %arr, ptr %out) {\nentry:\n" . $body . "}\n\n";
-            $result = [$fsym, \count($regs)];
+            $result = [$fsym, $filled >= 0 ? $filled : \count($regs), '', ''];
         }
 
         $this->ssa = $oldSsa;
@@ -11512,8 +11526,7 @@ trait EmitLlvmObjects
         $recvWord = $thisArg;
         // A cell receiver that holds a tagged scalar (a `false|Box` result) is php's Error, not a wild dereference.
         if ($mc->object->type->kind === Type::KIND_CELL) {
-            $out .= $this->emitObjArgGuard('Call to a member function ' . $mc->method . '() on ', '', 'Error');
-            $thisArg = $this->lastValue;
+            $out .= $this->emitRecvGuard($mc->method, $thisArg);
         }
         // A `mixed`/cell receiver carries a NaN-boxed object — strip the tag to
         // the raw object pointer so both the `$this` arg and the class_id
@@ -11745,6 +11758,13 @@ trait EmitLlvmObjects
             }
             for ($q = \count($ptypes); $q <= \count($mc->args); $q = $q + 1) { $ptypes[$q] = Type::cell(); }
         }
+        if (!$unboundPack && $widenRef === [] && $widenCell === [] && $this->frame->isTrampoline) {
+            $boxes = false;
+            foreach ($siteArgs as $j => $sa) {
+                if ($this->cellArrayParamNeedsBoxing($ptypes[$j + 1] ?? null, $sa->type)) { $boxes = true; }
+            }
+            if (!$boxes) { $out .= $this->trampBindPrepare($siteArgs, $mask, 1, $ptypes, false, $fallback . '__' . $mc->method); }
+        }
         $ai = 0;
         foreach ($siteArgs as $a) {
             // `$obj->m(...$arr)`: expand across the method's declared params
@@ -11904,6 +11924,8 @@ trait EmitLlvmObjects
             }
             $ai = $ai + 1;
         }
+        $this->trampArgNodes = [];
+        $this->trampArgRegs = [];
         if (!$unboundPack) { $out .= $this->surplusArgEffects($fallback . '__' . $mc->method, $mc->args, $fbStatic ? 0 : 1); }
         // Pad omitted trailing optionals: a typed-receiver call (`$x->m()`)
         // isn't default-filled at lowering (class unknown pre-InferTypes),

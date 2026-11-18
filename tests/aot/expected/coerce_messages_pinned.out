@@ -1,0 +1,66 @@
+recv int: Error: Call to a member function get() on int
+int int: int(5)
+str int: string(3) "[5]"
+float int: float(5)
+bool int: string(1) "T"
+foo int: TypeError: takeFoo(): Argument #1 ($o) must be of type Foo, int given
+retint int: int(5)
+retstr int: string(1) "5"
+prop-int int: int(5)
+prop-str int: string(1) "5"
+recv numstr: Error: Call to a member function get() on string
+int numstr: int(12)
+str numstr: string(4) "[12]"
+float numstr: float(12)
+foo numstr: TypeError: takeFoo(): Argument #1 ($o) must be of type Foo, string given
+retint numstr: int(12)
+retstr numstr: string(2) "12"
+prop-int numstr: int(12)
+prop-str numstr: string(2) "12"
+recv lead: Error: Call to a member function get() on string
+int lead: int(7)
+str lead: string(4) "[ 7]"
+float lead: float(7)
+foo lead: TypeError: takeFoo(): Argument #1 ($o) must be of type Foo, string given
+retint lead: int(7)
+retstr lead: string(2) " 7"
+prop-int lead: int(7)
+prop-str lead: string(2) " 7"
+recv str: Error: Call to a member function get() on string
+str str: string(5) "[abc]"
+foo str: TypeError: takeFoo(): Argument #1 ($o) must be of type Foo, string given
+retstr str: string(3) "abc"
+prop-int str: TypeError: Cannot assign string to property Foo::$n of type int
+prop-str str: string(3) "abc"
+recv true: Error: Call to a member function get() on true
+int true: int(1)
+str true: string(3) "[1]"
+float true: float(1)
+bool true: string(1) "T"
+foo true: TypeError: takeFoo(): Argument #1 ($o) must be of type Foo, true given
+retint true: int(1)
+retstr true: string(1) "1"
+prop-int true: int(1)
+prop-str true: string(1) "1"
+recv false: Error: Call to a member function get() on false
+int false: int(0)
+str false: string(2) "[]"
+float false: float(0)
+bool false: string(1) "F"
+foo false: TypeError: takeFoo(): Argument #1 ($o) must be of type Foo, false given
+retint false: int(0)
+retstr false: string(0) ""
+prop-int false: int(0)
+prop-str false: string(0) ""
+prop-int null: TypeError: Cannot assign null to property Foo::$n of type int
+prop-int arr: TypeError: Cannot assign array to property Foo::$n of type int
+recv foo: int(2)
+foo foo: int(1)
+str withstr: string(4) "[ws]"
+retstr withstr: string(2) "ws"
+prop-str withstr: string(2) "ws"
+arr arr: int(3)
+suit: string(1) "s"
+str float: string(5) "[2.5]"
+float float: float(2.5)
+retstr float: string(3) "2.5"

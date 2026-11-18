@@ -1,0 +1,3 @@
+g(): Argument #1 ($f) must be of type float, null given
+g(): Argument #1 ($f) must be of type float, array given
+g(): Argument #1 ($f) must be of type float, string given

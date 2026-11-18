@@ -661,6 +661,13 @@ trait EmitLlvmExpr
         $out .= "  %pl = call ptr @__manticore_cell_to_strptr(i64 %v)\n";
         $out .= "  ret ptr %pl\n";
         $out .= "}\n";
+        // The typed string boundary's i64 form, and which part of it the caller owns (a rendered
+        // scalar; 0 for the cell's own pointer): one call each per site instead of 1 + 3 lines.
+        $out .= "\ndefine i64 @__manticore_cell_to_strw(i64 %v) {\nentry:\n"
+            . "  %p = call ptr @__manticore_cell_to_strptr_s(i64 %v)\n  %r = ptrtoint ptr %p to i64\n  ret i64 %r\n}\n";
+        $out .= "\ndefine i64 @__manticore_cell_str_own(i64 %v, i64 %r) {\nentry:\n"
+            . "  %pm = and i64 %v, " . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n"
+            . "  %ne = icmp ne i64 %r, %pm\n  %o = select i1 %ne, i64 %r, i64 0\n  ret i64 %o\n}\n";
         return $out;
     }
 
@@ -4923,49 +4930,45 @@ trait EmitLlvmExpr
     private function coerceCellToStr(string $v): string
     {
         $this->rt->needsTaggedToStr = true;
-        if (!$this->hasObjToStr) {
-            $r = $this->ssa->allocReg();
-            $out = '  ' . $r . ' = call ptr @__manticore_tagged_to_str(i64 ' . $v . ")\n";
-            $out .= $this->cellStrResultOwnIr($v, $r);
-            $this->lastValue = $r;
-            $this->lastValueType = 'ptr';
-            return $out;
-        }
-        $slot = $this->ssa->allocReg();
-        $out = '  ' . $slot . " = alloca ptr\n";
-        $isBox = $this->ssa->allocReg();
-        $out .= '  ' . $isBox . ' = icmp ugt i64 ' . $v . ", -4503599627370496\n";
-        $ts = $this->ssa->allocReg();
-        $out .= '  ' . $ts . ' = lshr i64 ' . $v . ", 48\n";
-        $nib = $this->ssa->allocReg();
-        $out .= '  ' . $nib . ' = and i64 ' . $ts . ", 15\n";
-        $isObjNib = $this->ssa->allocReg();
-        $out .= '  ' . $isObjNib . ' = icmp eq i64 ' . $nib . ", 8\n";
-        $isObj = $this->ssa->allocReg();
-        $out .= '  ' . $isObj . ' = and i1 ' . $isBox . ', ' . $isObjNib . "\n";
-        $objL = $this->ssa->allocLabel('o2s.obj');
-        $scaL = $this->ssa->allocLabel('o2s.scalar');
-        $endL = $this->ssa->allocLabel('o2s.end');
-        $out .= '  br i1 ' . $isObj . ', label %' . $objL . ', label %' . $scaL . "\n";
-        $out .= $objL . ":\n";
-        $os = $this->ssa->allocReg();
-        // The dispatcher takes the CELL itself: its arms are `instanceof`, which
-        // unboxes on the tag the same way every other cell consumer does.
-        $out .= $this->objToStrCallIr($v, $os);
-        $out .= '  store ptr ' . $os . ', ptr ' . $slot . "\n";
-        $out .= '  br label %' . $endL . "\n";
-        $out .= $scaL . ":\n";
-        $ss = $this->ssa->allocReg();
-        $out .= '  ' . $ss . ' = call ptr @__manticore_tagged_to_str(i64 ' . $v . ")\n";
-        $out .= '  store ptr ' . $ss . ', ptr ' . $slot . "\n";
-        $out .= '  br label %' . $endL . "\n";
-        $out .= $endL . ":\n";
-        $res = $this->ssa->allocReg();
-        $out .= '  ' . $res . ' = load ptr, ptr ' . $slot . "\n";
-        $out .= $this->cellStrResultOwnIr($v, $res);
-        $this->lastValue = $res;
+        $this->rt->needsStrRc = true;
+        $r = $this->ssa->allocReg();
+        $this->lastValue = $r;
         $this->lastValueType = 'ptr';
-        return $out;
+        return '  ' . $r . ' = call ptr ' . $this->cellToStrHelper() . '(i64 ' . $v . ")\n";
+    }
+
+    /**
+     * The module's cell → string cast as one function, its result the caller's: a string cell is
+     * its payload, retained; an object goes through `__toString` ({@see objToStrCallIr}) when the
+     * module has the dispatcher; anything else through `__manticore_tagged_to_str`. Inline, the
+     * two diamonds were ~1 KB of IR at each of ~10k sites of a Symfony app.
+     */
+    private function cellToStrHelper(): string
+    {
+        $key = $this->hasObjToStr ? 'c2s.obj' : 'c2s';
+        $sym = '@' . $this->mirHelperSym($this->hasObjToStr ? '__mc_cell_to_str_o' : '__mc_cell_to_str');
+        if (isset($this->dynamicMethodHelpers[$key])) { return $sym; }
+        $oldSsa = $this->ssa;
+        $oldLast = $this->lastValue;
+        $oldLastType = $this->lastValueType;
+        $this->ssa = new \Compile\Mir\SsaBuilder();
+        $this->ssa->reset();
+        $mask = (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK;
+        $body = "  %istag = icmp ugt i64 %v, " . (string)\Compile\MemoryAbi::CELL_TAGGED_MIN . "\n"
+            . "  %ts = lshr i64 %v, 48\n  %nib = and i64 %ts, 15\n"
+            . "  %isS = icmp eq i64 %nib, 4\n  %str = and i1 %istag, %isS\n  br i1 %str, label %asstr, label %other\n"
+            . "asstr:\n  %pw = and i64 %v, " . $mask . "\n  %p = inttoptr i64 %pw to ptr\n"
+            . "  call void @__mir_rc_retain_str(ptr %p)\n  ret ptr %p\nother:\n";
+        if ($this->hasObjToStr) {
+            $body .= "  %isO = icmp eq i64 %nib, 8\n  %obj = and i1 %istag, %isO\n  br i1 %obj, label %asobj, label %scalar\n"
+                . "asobj:\n" . $this->objToStrCallIr('%v', '%os') . "  ret ptr %os\nscalar:\n";
+        }
+        $body .= "  %r = call ptr @__manticore_tagged_to_str(i64 %v)\n" . $this->cellStrResultOwnIr('%v', '%r') . "  ret ptr %r\n";
+        $this->dynamicMethodHelpers[$key] = 'define internal ptr ' . $sym . "(i64 %v) {\nentry:\n" . $body . "}\n\n";
+        $this->ssa = $oldSsa;
+        $this->lastValue = $oldLast;
+        $this->lastValueType = $oldLastType;
+        return $sym;
     }
 
     /**
@@ -6843,11 +6846,129 @@ trait EmitLlvmExpr
     private string $objArgHead = '';
 
     /**
+     * A method called on a CELL that holds a tagged int / string / bool is php's Error
+     * (`Call to a member function m() on false`), through {@see emitObjArgGuard}.
+     * lastValue is left as it was.
+     */
+    private function emitRecvGuard(string $method, string $v): string
+    {
+        $this->lastValue = $v;
+        $this->lastValueType = 'i64';
+        return $this->emitObjArgGuard('Call to a member function ' . $method . '() on ', '', 'Error');
+    }
+
+    /**
+     * A site's TypeError / Error texts as one `private constant [n x ptr]` of immortal string
+     * literals, named by content so every site with the same texts shares it. The cold helpers
+     * pick one by the value's kind: the thrown message is the literal the inline raise used.
+     * @param string[] $msgs
+     */
+    private function coerceMsgTable(array $msgs): string
+    {
+        $ptrs = [];
+        foreach ($msgs as $m) { $ptrs[] = 'ptr ' . $this->litStr($m); }
+        $init = '[' . (string)\count($ptrs) . ' x ptr] [' . \implode(', ', $ptrs) . ']';
+        $sym = $this->litTableSym('@.coem.', $init);
+        if ($sym[1]) {
+            $this->litTableBodies .= $sym[0] . ' = private unnamed_addr constant ' . $init . ", align 8\n";
+        }
+        return $sym[0];
+    }
+
+    /**
+     * The module's cold raise of {@see emitObjArgGuard}: `$cls(msgs[int|string|false|true])` through
+     * the same raise helper the inline guard used, so the thrown object (file, line, trace) is the
+     * one it built. '' when `$cls` has no raise helper.
+     */
+    private function tagFailHelper(string $cls): string
+    {
+        $raise = $this->raiseHelper($cls);
+        if ($raise === '') { return ''; }
+        $sym = '@' . $this->mirHelperSym('__mc_tag_fail.' . $this->mangle($cls));
+        if (isset($this->dynamicMethodHelpers['tagfail:' . $cls])) { return $sym; }
+        $this->rt->needsTagged = true;
+        $tag = $this->rt->needsRefCells
+            ? "  %t = call i64 @__manticore_tag(i64 %v)\n"
+            : "  %istag = icmp ugt i64 %v, " . (string)\Compile\MemoryAbi::CELL_TAGGED_MIN . "\n"
+                . "  %sh = lshr i64 %v, 48\n  %nr = and i64 %sh, 15\n  %is5 = icmp eq i64 %nr, 5\n"
+                . "  %n = select i1 %is5, i64 1, i64 %nr\n  %t = select i1 %istag, i64 %n, i64 6\n";
+        $this->dynamicMethodHelpers['tagfail:' . $cls] = 'define internal void ' . $sym . "(i64 %v, ptr %msgs) noinline cold {\nentry:\n"
+            . $tag
+            . "  %isI = icmp eq i64 %t, 1\n  %isS = icmp eq i64 %t, 4\n  %bit = and i64 %v, 1\n"
+            . "  %bi = add i64 %bit, 2\n  %si = select i1 %isS, i64 1, i64 %bi\n  %ix = select i1 %isI, i64 0, i64 %si\n"
+            . "  %g = getelementptr inbounds ptr, ptr %msgs, i64 %ix\n  %m = load ptr, ptr %g\n  %mi = ptrtoint ptr %m to i64\n"
+            . '  call void ' . $raise . "(i64 %mi, i64 0)\n  ret void\n}\n\n";
+        return $sym;
+    }
+
+    /**
+     * The module's cell → `int` coercion: `@__mc_co_int_m…(i64 v, ptr msgs)`, `msgs` the site's
+     * [null, array, string] TypeError texts ({@see coerceMsgTable}). The int tag is the inline fast
+     * path; anything else goes to the cold half, which throws through the TypeError raise helper or
+     * converts as `__manticore_cell_to_int_arg` does. Inline, the three-arm raise was ~1 KB of IR
+     * per site. '' when TypeError has no raise helper (the caller keeps its inline form).
+     */
+    private function coIntHelper(): string
+    {
+        $raise = $this->raiseHelper('TypeError');
+        if ($raise === '') { return ''; }
+        $sym = '@' . $this->mirHelperSym('__mc_co_int');
+        if (isset($this->dynamicMethodHelpers['coint'])) { return $sym; }
+        $slow = '@' . $this->mirHelperSym('__mc_co_int_slow');
+        $this->dynamicMethodHelpers['coint'] = 'define internal i64 ' . $sym . "(i64 %v, ptr %msgs) alwaysinline {\nentry:\n"
+            . "  %hi = lshr i64 %v, 48\n  %isint = icmp eq i64 %hi, 65521\n  br i1 %isint, label %fast, label %slow\n"
+            . "fast:\n  %s = shl i64 %v, 16\n  %r = ashr i64 %s, 16\n  ret i64 %r\n"
+            . 'slow:' . "\n  %x = call i64 " . $slow . "(i64 %v, ptr %msgs)\n  ret i64 %x\n}\n\n"
+            . 'define internal i64 ' . $slow . "(i64 %v, ptr %msgs) noinline cold {\nentry:\n"
+            . "  %istag = icmp ugt i64 %v, " . (string)\Compile\MemoryAbi::CELL_TAGGED_MIN . "\n  br i1 %istag, label %tagged, label %conv\n"
+            . "tagged:\n  %bad = call i32 @__manticore_cell_int_bad_slow(i64 %v)\n  %ok = icmp eq i32 %bad, 0\n  br i1 %ok, label %conv, label %raise\n"
+            . "conv:\n  %c = call i64 @__manticore_cell_to_int_arg_slow(i64 %v)\n  ret i64 %c\n"
+            . "raise:\n  %b1 = sub i32 %bad, 1\n  %ix = zext i32 %b1 to i64\n"
+            . "  %g = getelementptr inbounds ptr, ptr %msgs, i64 %ix\n  %m = load ptr, ptr %g\n  %mi = ptrtoint ptr %m to i64\n"
+            . '  call void ' . $raise . "(i64 %mi, i64 0)\n  ret i64 0\n}\n\n";
+        return $sym;
+    }
+
+    /** {@see emitRecvGuard}'s test: the word is tagged int (or bigint), string or bool. */
+    private function recvBadRuntime(): string
+    {
+        $o = "\ndefine i1 @__mc_recv_bad(i64 %v) alwaysinline {\nentry:\n";
+        if ($this->rt->needsRefCells) {
+            $o .= "  %t = call i64 @__manticore_tag(i64 %v)\n";
+        } else {
+            $o .= "  %istag = icmp ugt i64 %v, " . (string)\Compile\MemoryAbi::CELL_TAGGED_MIN . "\n"
+                . "  %s = lshr i64 %v, 48\n  %nr = and i64 %s, 15\n  %is5 = icmp eq i64 %nr, 5\n"
+                . "  %n = select i1 %is5, i64 1, i64 %nr\n  %t = select i1 %istag, i64 %n, i64 6\n";
+        }
+        return $o . "  %i = icmp eq i64 %t, 1\n  %st = icmp eq i64 %t, 4\n  %b = icmp eq i64 %t, 2\n"
+            . "  %o = or i1 %i, %st\n  %r = or i1 %o, %b\n  ret i1 %r\n}\n";
+    }
+
+    /**
      * A CELL word reaching a class-typed param that is tagged int / bool / string is php's TypeError
      * (`false given`): without it the unbox masked the tag off and the callee read a null object.
      * Only TAGGED words are judged — an untagged word may be a raw object pointer the claim never boxed.
+     * One shared tag test and a cold call to {@see tagFailHelper} with the four messages as a
+     * constant table: inline, the test, the literals and the raise were ~1.1 KB of IR per site.
      */
     private function emitObjArgGuard(string $head, string $given = ' given', string $cls = 'TypeError'): string
+    {
+        $fn = $this->tagFailHelper($cls);
+        if ($fn === '') { return $this->emitObjArgGuardInline($head, $given, $cls); }
+        $v = $this->lastValue;
+        $this->rt->needsRecvBad = true;
+        $this->rt->needsTagged = true;
+        $tbl = $this->coerceMsgTable([$head . 'int' . $given, $head . 'string' . $given, $head . 'false' . $given, $head . 'true' . $given]);
+        $bad = $this->ssa->allocReg();
+        $fail = $this->ssa->allocLabel('tag.bad');
+        $ok = $this->ssa->allocLabel('tag.ok');
+        return '  ' . $bad . ' = call i1 @__mc_recv_bad(i64 ' . $v . ")\n"
+            . '  br i1 ' . $bad . ', label %' . $fail . ', label %' . $ok . "\n" . $fail . ":\n"
+            . '  call void ' . $fn . '(i64 ' . $v . ', ptr ' . $tbl . ")\n"
+            . "  unreachable\n" . $ok . ":\n";
+    }
+
+    private function emitObjArgGuardInline(string $head, string $given, string $cls): string
     {
         $v = $this->lastValue;
         $vt = $this->lastValueType;
@@ -7099,6 +7220,19 @@ trait EmitLlvmExpr
             $this->rt->needsStrtol = true;
             $keep = $this->lastValue;
             $out = '';
+            $co = $this->intGuardOff ? '' : $this->coIntHelper();
+            if ($co !== '') {
+                $msgs = [];
+                foreach (['null', 'array', 'string'] as $given) {
+                    $msgs[] = $this->unboxPropCtx !== ''
+                        ? 'Cannot assign ' . $given . ' to property ' . $this->unboxPropCtx . ' of type int'
+                        : 'Argument must be of type int, ' . $given . ' given';
+                }
+                $r = $this->ssa->allocReg();
+                $this->lastValue = $r;
+                $this->lastValueType = 'i64';
+                return '  ' . $r . ' = call i64 ' . $co . '(i64 ' . $keep . ', ptr ' . $this->coerceMsgTable($msgs) . ")\n";
+            }
             // A by-ref scratch holds a callee's OUTPUT: a null there is no argument.
             if (!$this->intGuardOff) {
                 $bad = $this->ssa->allocReg();
@@ -7140,7 +7274,7 @@ trait EmitLlvmExpr
             $p = $this->ssa->allocReg();
             $out .= '  ' . $p . ' = inttoptr i64 ' . $m . " to ptr\n";
             $g = $this->ssa->allocReg();
-            $out .= '  ' . $g . ' = getelementptr i8, ptr ' . $p . ", i64 16\n";
+            $out .= '  ' . $g . ' = getelementptr i8, ptr ' . $p . ", i64 " . (string)\Compile\MemoryAbi::ENUM_ORDINAL_OFFSET . "\n";
             $r = $this->ssa->allocReg();
             $out .= '  ' . $r . ' = load i64, ptr ' . $g . "\n";
             $this->lastValue = $r;
@@ -7157,23 +7291,15 @@ trait EmitLlvmExpr
             // NULL and an object/array cell is untouched.
             $this->rt->needsCellToStrPtr = true;
             $this->rt->needsTaggedToStr = true;
-            $r = $this->ssa->allocReg();
-            $out = '  ' . $r . ' = call ptr @__manticore_cell_to_strptr_s(i64 '
-                 . $this->lastValue . ")\n";
-            // Hand back an i64 like the plain strip did: this helper serves
-            // every cell→string boundary, and a `return` site stores the result
-            // straight into an i64 slot without coercing.
+            // An i64 like the plain strip handed back: this helper serves every cell→string
+            // boundary, and a `return` site stores the result straight into an i64 slot.
             $ri = $this->ssa->allocReg();
-            $out .= '  ' . $ri . ' = ptrtoint ptr ' . $r . " to i64\n";
+            $out = '  ' . $ri . ' = call i64 @__manticore_cell_to_strw(i64 ' . $this->lastValue . ")\n";
             if ($this->collectCellStrOwn) {
                 // A rendered scalar is a fresh string the CALLER must free after
-                // the call; a stripped pointer is the cell's own (null = borrowed).
-                $pm = $this->ssa->allocReg();
-                $out .= '  ' . $pm . ' = and i64 ' . $this->lastValue . ', ' . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n";
-                $ne = $this->ssa->allocReg();
-                $out .= '  ' . $ne . ' = icmp ne i64 ' . $ri . ', ' . $pm . "\n";
+                // the call; a stripped pointer is the cell's own (0 = borrowed).
                 $ow = $this->ssa->allocReg();
-                $out .= '  ' . $ow . ' = select i1 ' . $ne . ', i64 ' . $ri . ", i64 0\n";
+                $out .= '  ' . $ow . ' = call i64 @__manticore_cell_str_own(i64 ' . $this->lastValue . ', i64 ' . $ri . ")\n";
                 $this->cellStrOwn = $ow;
             }
             $this->lastValue = $ri;

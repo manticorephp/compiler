@@ -1,0 +1,3 @@
+null: s(): Argument #1 ($x) must be of type string, null given
+array: s(): Argument #1 ($x) must be of type string, array given
+object: s(): Argument #1 ($x) must be of type string, NoStr given

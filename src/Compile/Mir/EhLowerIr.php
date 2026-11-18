@@ -579,6 +579,8 @@ final class EhLowerIr
             || $callee === '@__manticore_deref'
             || $callee === '@__manticore_tag'
             || $callee === '@__manticore_cell_int_bad'
+            || $callee === '@__mc_recv_bad'
+            || $callee === '@__manticore_cell_str_own'
             || $callee === '@__mir_obj_handle_alloc'
             || \str_starts_with($callee, '@__mc_dynf_')
             || \str_starts_with($callee, '@__mir_arena_')
@@ -676,10 +678,12 @@ final class EhLowerIr
             if ($name !== '') {
                 $this->inFn = true;
                 $this->fnName = $name;
-                // The runtime's own entry points never propagate: no checks inside.
+                // The runtime's own entry points never propagate: no checks inside. The cell → string
+                // cast helper ends every path at its one may-throw call: its caller checks.
                 $this->skip = \str_starts_with($name, '@__mc_eh_') || $name === '@__mc_throw' || $name === '@__mc_uncaught'
                     || $name === '@__mir_uncaught' || \str_starts_with($name, '@"__mc_cc.')
-                    || $name === '@__manticore_shutdown' || $name === '@__manticore_ob_shutdown';
+                    || $name === '@__manticore_shutdown' || $name === '@__manticore_ob_shutdown'
+                    || \str_starts_with($name, '@__mc_cell_to_str');
                 $this->isMain = $name === '@main';
                 $at = \strpos($l, ' @');
                 $this->retTy = $at === false ? 'void' : self::retTypeOf(\substr($l, 0, $at));

@@ -426,13 +426,15 @@ final class TrampolineSynth
             for ($i = 0; $i < $k; $i = $i + 1) { $parts[] = '$a[' . (string)$i . ']'; }
             return \implode(', ', $parts);
         };
+        // One count: the guard and the optional arms read the same $n.
+        $count = "  \$n = count(\$a);\n";
         $guard = $req > 0
-            ? '  if (count($a) < ' . (string)$req . ') { \\' . self::TOO_FEW . '(count($a), ' . (string)$req . "); }\n"
+            ? $count . '  if ($n < ' . (string)$req . ') { \\' . self::TOO_FEW . '($n, ' . (string)$req . "); }\n"
             : '';
         if ($req >= $tot) {
             return $guard . $stmt($mk($argsUpTo($tot)));
         }
-        $out = $guard . "  \$n = count(\$a);\n";
+        $out = $req > 0 ? $guard : $count;
         if ($defaults !== null) {
             $parts = [];
             for ($i = 0; $i < $req; $i = $i + 1) { $parts[] = '$a[' . (string)$i . ']'; }

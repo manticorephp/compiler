@@ -1,0 +1,5 @@
+return null: r(): Return value must be of type string, null returned
+return array: r(): Return value must be of type string, array returned
+return object: r(): Return value must be of type string, Foo returned
+prop null: Cannot assign null to property Foo::$s of type string
+prop array: Cannot assign array to property Foo::$s of type string
