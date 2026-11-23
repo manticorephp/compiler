@@ -2212,7 +2212,11 @@ final class UnifiedArrayRuntime
         // CLOSURE_TAG_MAGIC@-32, rc@-8), which `__mir_closure_release` checks
         // for itself — anything else is left alone there.
         $doclo = $fn->block('doclo');
-        $chkmagic->brIf($chkmagic->icmp('eq', $hdr, Value::int(Type::i64(), MemoryAbi::RC_TAG_MAGIC)), $dorel, $doclo);
+        // An enum case singleton (ENUM_TAG_MAGIC@-8) is immortal, and may be the first object of a
+        // read-only section: nothing below -8 is mapped, so it never reaches the closure probes.
+        $chkenum = $fn->block('chkenum');
+        $chkmagic->brIf($chkmagic->icmp('eq', $hdr, Value::int(Type::i64(), MemoryAbi::RC_TAG_MAGIC)), $dorel, $chkenum);
+        $chkenum->brIf($chkenum->icmp('eq', $hdr, Value::int(Type::i64(), MemoryAbi::ENUM_TAG_MAGIC)), $done, $doclo);
         // A Generator frame boxed as an object: its header is a string's
         // (GENERATOR_TAG_MAGIC@-24), so it counts and frees like one.
         $dogen = $fn->block('dogen');
@@ -2624,7 +2628,9 @@ final class UnifiedArrayRuntime
         $opp = $chkmagic->inttoptr($op, Type::ptr());
         $hdr = $chkmagic->load(Type::i64(), $chkmagic->gep(Type::i8(), $opp, [Value::int(Type::i64(), -8)]));
         $doclo = $fn->block('doclo');
-        $chkmagic->brIf($chkmagic->icmp('eq', $hdr, Value::int(Type::i64(), MemoryAbi::RC_TAG_MAGIC)), $doret, $doclo);
+        $chkenum = $fn->block('chkenum');
+        $chkmagic->brIf($chkmagic->icmp('eq', $hdr, Value::int(Type::i64(), MemoryAbi::RC_TAG_MAGIC)), $doret, $chkenum);
+        $chkenum->brIf($chkenum->icmp('eq', $hdr, Value::int(Type::i64(), MemoryAbi::ENUM_TAG_MAGIC)), $done, $doclo);
         $dogen = $fn->block('dogen');
         $docl2 = $fn->block('docl2');
         $gcap = $doclo->load(Type::i64(), $doclo->gep(Type::i8(), $opp, [Value::int(Type::i64(), -24)]));
