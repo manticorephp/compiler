@@ -39,4 +39,8 @@ final class Param
         /** The param's own docblock: a promoted param's inline `@var` ({@see \Analyze\DocType::promotedVar}). */
         public readonly ?string $docComment = null,
     ) {}
+
+    /** The declared hint of a parameter that refuses null (`string`, `int|float`), '' otherwise: php 9's
+     *  TypeError for null into an internal function names it. Carried across the `.sig` (#751). */
+    public string $nullRejectHint = '';
 }

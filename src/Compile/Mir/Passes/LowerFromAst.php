@@ -1243,6 +1243,9 @@ final class LowerFromAst implements Pass
                 $hints = [];
                 foreach ($extDecl->params as $bp) { $hints[] = \strtolower($bp->typeHint ?? ''); }
                 $module->builtinTwinParams[$name] = $hints;
+                foreach ($extDecl->params as $bi => $bp) {
+                    if ($bp->nullRejectHint !== '') { $module->builtinTwinNullReject[$name][$bi] = [$bp->name, $bp->nullRejectHint]; }
+                }
                 foreach ($extDecl->params as $bp) {
                     if ($bp->byRef) { $module->builtinTwinRef[$name] = true; }
                 }

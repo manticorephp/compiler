@@ -98,4 +98,7 @@ final class Param
      *  a docblock, so a body that casts the param with `(array)` is expecting a non-array (an object row
      *  handed to `newFromBuilder($attributes)`); {@see Passes\InferTypes::withdrawDocArrayClaims}. */
     public bool $docOnly = false;
+
+    /** {@see \Parser\Ast\Param::$nullRejectHint}. */
+    public string $nullRejectHint = '';
 }

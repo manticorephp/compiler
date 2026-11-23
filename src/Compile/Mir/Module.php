@@ -351,6 +351,8 @@ final class Module
     public array $builtinTwinRef = [];
     /** @var array<string, string[]> twin name => the declared parameter type hints, lowercased */
     public array $builtinTwinParams = [];
+    /** @var array<string, array<int, string[]>> twin name => param index => [name, hint] of each parameter refusing null (#751) */
+    public array $builtinTwinNullReject = [];
 
     /** Register a global cell once (idempotent by name). $isPrelude →
      *  linkonce_odr; $isExtern → a declaration, defined in a dependency's `.o`. */
