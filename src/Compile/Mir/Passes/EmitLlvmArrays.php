@@ -274,6 +274,9 @@ trait EmitLlvmArrays
             $out .= $this->emitNode($aa->index);
             $out .= $this->coerceStrOffset($aa->index, $mode);
             $idx = $this->lastValue;
+            if ($mode === 'read' && $aa->missThrows) {
+                $out .= $this->strOffsetRangeCheck($base, $idx);
+            }
             $buf = $this->ssa->allocReg();
             $out .= '  ' . $buf . ' = call ptr @__mir_str_char_at(ptr '
                   . $base . ', i64 ' . $idx . ")\n";
@@ -2068,6 +2071,8 @@ trait EmitLlvmArrays
             $args .= ', i64 ' . $this->lastValue;
             $variant = 'w_' . $variant;
         }
+        // A read the source wrote raises on a missing key / string offset (prefix `x_`).
+        if ($aa->missThrows && !$aa->probe) { $variant = 'x_' . $variant; }
         $this->eidxNeeded[$variant] = true;
         $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = call i64 @' . $this->mirHelperSym('__mir_eidx_' . $variant)
@@ -2112,8 +2117,10 @@ trait EmitLlvmArrays
         $out = '';
         foreach ($this->eidxNeeded as $variant => $ignoredFlag) {
             $this->ssa->reset();
-            $wKey = \str_starts_with($variant, 'w_');
-            $vbase = $wKey ? \substr($variant, 2) : $variant;
+            $strict = \str_starts_with($variant, 'x_');
+            $vbase = $strict ? \substr($variant, 2) : $variant;
+            $wKey = \str_starts_with($vbase, 'w_');
+            $vbase = $wKey ? \substr($vbase, 2) : $vbase;
             $decode = \str_ends_with($vbase, 'c');
             $keyKind = $decode ? \substr($vbase, 0, -1) : $vbase;
             $keyIsString = $keyKind === 'str';
@@ -2132,7 +2139,7 @@ trait EmitLlvmArrays
                 $body .= '  ' . $kp . " = inttoptr i64 %eix.k to ptr\n";
                 $key = $kp;
             }
-            $body .= $this->erasedIndexCoreIr('%eix.a', $key, $keyIsCell, $keyIsString, $hashArgs, $decode, $wKey ? '%eix.o' : '');
+            $body .= $this->erasedIndexCoreIr('%eix.a', $key, $keyIsCell, $keyIsString, $hashArgs, $decode, $wKey ? '%eix.o' : '', $strict);
             $out .= 'define linkonce_odr i64 @' . $this->mirHelperSym('__mir_eidx_' . $variant)
                   . '(' . $params . ") noinline {\nentry:\n" . $body
                   . '  ret i64 ' . $this->lastValue . "\n}\n\n";
@@ -2153,6 +2160,7 @@ trait EmitLlvmArrays
         string $hashArgs,
         bool $decode = false,
         string $objKeyCell = '',
+        bool $strict = false,
     ): string {
         $holders = $this->ifaceMethodHolders('ArrayAccess', 'offsetGet');
         $out = '';
@@ -2228,6 +2236,7 @@ trait EmitLlvmArrays
                 $out .= $this->unboxCellToType(Type::int_());
                 $si = $this->lastValue;
             }
+            if ($strict) { $out .= $this->strOffsetRangeCheck($sp, $si); }
             $ch = $this->ssa->allocReg();
             $out .= '  ' . $ch . ' = call ptr @__mir_str_char_at(ptr ' . $sp
                   . ', i64 ' . $si . ")\n";
@@ -2247,7 +2256,21 @@ trait EmitLlvmArrays
         $ap = $this->ssa->allocReg();
         $out .= '  ' . $ap . ' = inttoptr i64 ' . $am . " to ptr\n";
         $av = $this->ssa->allocReg();
-        if ($keyIsCell) {
+        if ($strict) {
+            // Only an ARRAY subject raises the missing key: a boxed null / scalar
+            // is php's other warning, and reads 0 as before. A raw word is the
+            // array pointer itself.
+            $isArrNib = $this->ssa->allocReg();
+            $out .= '  ' . $isArrNib . ' = icmp eq i64 ' . $nib . ", 7\n";
+            $notBox = $this->ssa->allocReg();
+            $out .= '  ' . $notBox . ' = xor i1 ' . $isBox . ", true\n";
+            $isArr = $this->ssa->allocReg();
+            $out .= '  ' . $isArr . ' = or i1 ' . $notBox . ', ' . $isArrNib . "\n";
+            $ap2 = $this->ssa->allocReg();
+            $out .= '  ' . $ap2 . ' = select i1 ' . $isArr . ', ptr ' . $ap . ", ptr null\n";
+            $out .= $this->emitMissThrowingRead($ap2, $key, $keyIsCell, $keyIsString, $hashArgs);
+            $out .= '  ' . $av . ' = add i64 ' . $this->lastValue . ", 0\n";
+        } elseif ($keyIsCell) {
             $this->rt->needsCellKey = true;
             $out .= '  ' . $av . ' = call i64 @__mir_array_get_cell(ptr ' . $ap
                   . ', i64 ' . $key . ")\n";
@@ -2281,6 +2304,78 @@ trait EmitLlvmArrays
         $out .= $endL . ":\n";
         $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = load i64, ptr ' . $slot . "\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /**
+     * `$s[$i]` read past either end of a non-null string raises php's warning
+     * text, `Uninitialized string offset N` (#718); `@$s[$i]` keeps the "".
+     */
+    private function strOffsetRangeCheck(string $s, string $idx): string
+    {
+        $in = $this->ssa->allocReg();
+        $out = '  ' . $in . ' = call i1 @__mir_str_offset_isset(ptr ' . $s . ', i64 ' . $idx . ")\n";
+        $nn = $this->ssa->allocReg();
+        $out .= '  ' . $nn . ' = icmp ne ptr ' . $s . ", null\n";
+        $oob = $this->ssa->allocReg();
+        $out .= '  ' . $oob . ' = xor i1 ' . $in . ", true\n";
+        $raise = $this->ssa->allocReg();
+        $out .= '  ' . $raise . ' = and i1 ' . $oob . ', ' . $nn . "\n";
+        $thrL = $this->ssa->allocLabel('stroff.oob');
+        $okL = $this->ssa->allocLabel('stroff.ok');
+        $out .= '  br i1 ' . $raise . ', label %' . $thrL . ', label %' . $okL . "\n";
+        $out .= $thrL . ":\n";
+        $out .= '  call i64 @manticore___mir_uninit_str_offset(i64 ' . $idx . ")\n";
+        $out .= '  br label %' . $okL . "\n";
+        $out .= $okL . ":\n";
+        return $out;
+    }
+
+    /**
+     * A {@see ArrayAccess_::$missThrows} element read: one lookup, and its miss
+     * raises php's warning text through the prelude (`__mir_undefined_key_*`).
+     * The hit word is the slot content, as `__mir_array_get_*` answers; a null
+     * base (a `?array` holding null) reads 0 as before. `$key` stays live until
+     * the raise, so the caller releases a fresh key after this.
+     */
+    private function emitMissThrowingRead(string $arr, string $key, bool $keyIsCell, bool $keyIsString, string $hashArgs): string
+    {
+        $p = $this->ssa->allocReg();
+        if ($keyIsCell) {
+            $this->rt->needsCellKey = true;
+            $out = '  ' . $p . ' = call ptr @__mir_array_lookup_cell(ptr ' . $arr . ', i64 ' . $key . ")\n";
+        } elseif ($keyIsString) {
+            $out = '  ' . $p . ' = call ptr @__mir_array_lookup_str(ptr ' . $arr . ', ptr ' . $key . $hashArgs . ")\n";
+        } else {
+            $out = '  ' . $p . ' = call ptr @__mir_array_lookup_int(ptr ' . $arr . ', i64 ' . $key . ")\n";
+        }
+        $w = $this->ssa->allocReg();
+        $out .= '  ' . $w . ' = load i64, ptr ' . $p . "\n";
+        $miss = $this->ssa->allocReg();
+        $out .= '  ' . $miss . ' = icmp eq ptr ' . $p . ', @' . \Compile\MemoryAbi::ARRAY_LOOKUP_MISS_SYMBOL . "\n";
+        $nn = $this->ssa->allocReg();
+        $out .= '  ' . $nn . ' = icmp ne ptr ' . $arr . ", null\n";
+        $raise = $this->ssa->allocReg();
+        $out .= '  ' . $raise . ' = and i1 ' . $miss . ', ' . $nn . "\n";
+        $thrL = $this->ssa->allocLabel('key.miss');
+        $okL = $this->ssa->allocLabel('key.ok');
+        $out .= '  br i1 ' . $raise . ', label %' . $thrL . ', label %' . $okL . "\n";
+        $out .= $thrL . ":\n";
+        if ($keyIsCell) {
+            $out .= '  call i64 @manticore___mir_undefined_key_cell(i64 ' . $key . ")\n";
+        } elseif ($keyIsString) {
+            $ki = $this->ssa->allocReg();
+            $out .= '  ' . $ki . ' = ptrtoint ptr ' . $key . " to i64\n";
+            $out .= '  call i64 @manticore___mir_undefined_key_str(i64 ' . $ki . ")\n";
+        } else {
+            $out .= '  call i64 @manticore___mir_undefined_key_int(i64 ' . $key . ")\n";
+        }
+        $out .= '  br label %' . $okL . "\n";
+        $out .= $okL . ":\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = select i1 ' . $miss . ', i64 0, i64 ' . $w . "\n";
         $this->lastValue = $r;
         $this->lastValueType = 'i64';
         return $out;
@@ -2321,6 +2416,9 @@ trait EmitLlvmArrays
         $reg = $pre !== null ? $pre['word'] : $this->ssa->allocReg();
         if ($pre !== null) {
             // the word came from the probe
+        } elseif ($aa->missThrows && !$aa->probe) {
+            $out .= $this->emitMissThrowingRead($arrPtr, $key, $keyIsCell, $keyIsString, $keyIsString ? $this->litKeyHashArgs($aa->index) : '');
+            $reg = $this->lastValue;
         } elseif ($keyIsCell) {
             $this->rt->needsCellKey = true;
             $out .= '  ' . $reg . ' = call i64 @__mir_array_get_cell(ptr ' . $arrPtr . ', i64 ' . $key . ")\n";

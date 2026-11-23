@@ -1,0 +1,31 @@
+typed: Undefined array key "b"
+typed-hit ok
+erased-int: Undefined array key 5
+erased-str: Undefined array key "zz"
+NULL
+erased-null-elem ok
+erased-string: Uninitialized string offset 9
+numeric-string-key: Undefined array key 9
+nested-inner: Undefined array key "y"
+nested-outer: Undefined array key "x"
+list: Undefined array key 1
+list-keyed: Undefined array key "a"
+compound: Undefined array key "n"
+inc: Undefined array key "n"
+byte: Uninitialized string offset 2
+byte-neg: Uninitialized string offset -3
+is-x: Uninitialized string offset 5
+98X
+byte-hit ok
+3
+write-nested ok
+0
+write-unset ok
+1
+write-ref ok
+2
+write-foreach-ref ok
+11
+write-prop ok
+01d
+probe ok
