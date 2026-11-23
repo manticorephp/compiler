@@ -296,6 +296,13 @@ trait EmitLlvmArrays
             // A bound SplFixedArray<Class> read is typed the class
             // ({@see InferNodes::inferArrayAccess}); the call and the inline
             // load both answer the CELL word, which is unboxed to the pointer.
+            // A probe or write-base fetch (`$ao['q']['n'] ?? d`, `unset($ao['q']['n'])`) on ArrayObject / ArrayIterator is php's
+            // quiet IS-mode fetch: their `__mcGetW` answers null for a missing element (#718).
+            $acls = \ltrim($aa->array->type->class ?? '', '\\');
+            if (($aa->probe || !$aa->missThrows) && ($acls === 'ArrayObject' || $acls === 'ArrayIterator')) {
+                return $this->emitMethodCall(new \Compile\Mir\MethodCall_($aa->array, '__mcGetW',
+                    [$this->keyAsWritten($aa->array, $aa->index)], $n->type));
+            }
             $wantObj = $n->type->kind === Type::KIND_OBJ && $this->fixedArrayIsPlain($aa);
             $mc = new \Compile\Mir\MethodCall_($aa->array, 'offsetGet', [$this->keyAsWritten($aa->array, $aa->index)], $wantObj ? Type::cell() : $n->type);
             $fast = $this->emitFixedArrayGet($aa, $mc);
@@ -1243,8 +1250,14 @@ trait EmitLlvmArrays
         $out .= '  ' . $slot . " = alloca i64\n";
         $this->locals->slots[$tmp] = $slot;
         $cell = Type::cell();
-        // tmp = $map[$k]  (offsetGet, a counted cell)
-        $out .= $this->emitNode($access);
+        // tmp = $map[$k]  (offsetGet, a counted cell). ArrayObject / ArrayIterator fetch for
+        // WRITING through their own `__mcGetW`: a missing element is created, not a read (#718).
+        if (\ltrim($access->array->type->class ?? '', '\\') !== 'WeakMap') {
+            $out .= $this->emitNode(new \Compile\Mir\MethodCall_($access->array, '__mcGetW',
+                [$this->keyAsWritten($access->array, $access->index)], $cell));
+        } else {
+            $out .= $this->emitNode($access);
+        }
         $out .= $this->coerceToI64();
         $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $slot . "\n";
         // tmp[$j] = $v  — copy-on-write against the map's own reference

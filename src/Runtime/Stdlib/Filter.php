@@ -366,7 +366,7 @@ function __mc_filter_url(string $v, int $flags): ?string
     if ($scheme !== null && (\strcasecmp($scheme, 'http') === 0 || \strcasecmp($scheme, 'https') === 0)) {
         if ($host === null) { return null; }
         $l = \strlen($host);
-        $isV6 = $host[0] === '[' && $host[$l - 1] === ']' && __mc_filter_ipv6_ok(\substr($host, 1, $l - 2));
+        $isV6 = $l > 1 && $host[0] === '[' && $host[$l - 1] === ']' && __mc_filter_ipv6_ok(\substr($host, 1, $l - 2));
         if (!$isV6 && !__mc_filter_domain_ok($host, true)) { return null; }
         if ($isV6) {
             $host = '[]';
