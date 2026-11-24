@@ -1,6 +1,6 @@
-0
-5
-[]
+TypeError: strlen(): Argument #1 ($string) must be of type string, null given
+[5]
+TypeError: substr(): Argument #1 ($string) must be of type string, null given
 [hel]
-[]
+TypeError: strtoupper(): Argument #1 ($string) must be of type string, null given
 [ABC]

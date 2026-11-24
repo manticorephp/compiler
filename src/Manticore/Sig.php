@@ -818,6 +818,7 @@ final class Sig
             . ",\"variadic\":" . ($p->variadic ? "true" : "false");
         $def = self::encodeDefault($p->default);
         if ($def !== "") { $out = $out . ",\"default\":" . $def; }
+        if ($p->nullRejectHint !== "") { $out = $out . ",\"nonnull\":" . self::jsonStr($p->nullRejectHint); }
         return $out . "}";
     }
 
@@ -952,6 +953,7 @@ final class Sig
                 );
                 $ap->refOut = $refout;
                 $ap->cellArg = $cellarg;
+                $ap->nullRejectHint = (string)($p["nonnull"] ?? "");
                 $params[] = $ap;
             }
             // `#[Overload('f')]` crosses the boundary as the attribute itself, so

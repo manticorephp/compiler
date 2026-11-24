@@ -1681,6 +1681,14 @@ final class ArrayAccess_ extends Node
     public bool $refStored = false;
 
     /**
+     * A READ the source wrote outside `@`: a missing key throws php's warning
+     * text as OutOfBoundsException (`Undefined array key 5`), a string offset
+     * past either end `Uninitialized string offset 5` (#718). Reads the compiler
+     * synthesizes keep the quiet default. A {@see $probe} never throws.
+     */
+    public bool $missThrows = false;
+
+    /**
      * A base php fetches AFTER the key in `$base[$k]` under isset / `??` (delayed
      * fetch): a variable, a property, a static property or an element of one.
      * A call base (`f()[$k]`) runs first.

@@ -1,10 +1,10 @@
 <?php
 // foreach over a non-array must be a no-op (php warns to stderr + skips), not a
-// fault. Covers: undefined array-key read (null), literal null, and a `mixed`
+// fault. Covers: a missing key probed to null, literal null, and a `mixed`
 // param holding null / array / scalar. Regression for the cell-iterand crash.
 $a = ["x" => 1];
 $out = [];
-foreach ($a["missing"] as $e) { $out[] = $e; }   // undefined key -> null
+foreach ($a["missing"] ?? null as $e) { $out[] = $e; }   // missing key -> null (a bare read throws, #718)
 echo "undef: ", count($out), "\n";
 
 $n = null;

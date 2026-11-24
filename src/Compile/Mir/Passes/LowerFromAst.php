@@ -1243,6 +1243,9 @@ final class LowerFromAst implements Pass
                 $hints = [];
                 foreach ($extDecl->params as $bp) { $hints[] = \strtolower($bp->typeHint ?? ''); }
                 $module->builtinTwinParams[$name] = $hints;
+                foreach ($extDecl->params as $bi => $bp) {
+                    if ($bp->nullRejectHint !== '') { $module->builtinTwinNullReject[$name][$bi] = [$bp->name, $bp->nullRejectHint]; }
+                }
                 foreach ($extDecl->params as $bp) {
                     if ($bp->byRef) { $module->builtinTwinRef[$name] = true; }
                 }
@@ -1947,6 +1950,7 @@ final class LowerFromAst implements Pass
             ExtractScope::expand($module);
         }
         $this->bindRefTakenForeachVars($module);
+        foreach ($module->functions as $fd) { self::quietWriteFetches($fd->body); }
         $module->markPassApplied(self::NAME);
         return $module;
     }
@@ -1967,6 +1971,41 @@ final class LowerFromAst implements Pass
             if ($taken !== []) { $this->rebindRefTakenForeach($fd->body, $taken); }
         }
     }
+
+    /**
+     * php fetches the base of a write for WRITING: `$a['x'][] = 1`, `unset($a['x']['y'])`,
+     * `$r = &$a['x']`, `foreach ($a['x'] as &$v)` create or skip a missing key without a
+     * warning, so their element reads down the base spine do not raise
+     * ({@see ArrayAccess_::$missThrows}). The written key itself is no read either.
+     */
+    private static function quietWriteFetches(Node $n): void
+    {
+        $k = $n->kind;
+        if ($k === Node::KIND_STORE_ELEMENT) {
+            self::quietSpine(Walk::children($n)[0]);
+        } elseif ($k === Node::KIND_UNSET || $k === Node::KIND_REF_ADDR) {
+            foreach (Walk::children($n) as $t) { self::quietSpine($t); }
+        } elseif ($k === Node::KIND_FOREACH && self::asForeachNode($n)->byRef) {
+            self::quietSpine(self::asForeachNode($n)->array);
+        }
+        foreach (Walk::children($n) as $c) { self::quietWriteFetches($c); }
+    }
+
+    private static function quietSpine(Node $n): void
+    {
+        $b = $n;
+        while (true) {
+            if ($b->kind === Node::KIND_ARRAY_ACCESS) {
+                self::asArrayAccessNode($b)->missThrows = false;
+                $b = self::asArrayAccessNode($b)->array;
+                continue;
+            }
+            if ($b->kind === Node::KIND_PROPERTY_ACCESS) { $b = Walk::children($b)[0]; continue; }
+            break;
+        }
+    }
+
+    private static function asArrayAccessNode(Node $n): ArrayAccess_ { return $n; }
 
     /** @param array<string, true> $out */
     private static function collectRefTakenNames(Node $n, array &$out): void
@@ -8345,6 +8384,7 @@ final class LowerFromAst implements Pass
                 $key,
                 Type::unknown(),
             );
+            $access->missThrows = $this->silenceDepth === 0;
             $stmts[] = $this->storeToTarget($el->value, $access);
             $idx = $idx + 1;
         }
@@ -8645,7 +8685,9 @@ final class LowerFromAst implements Pass
         $idx = $expr->index === null
             ? new NullConst(Type::null_())
             : $this->foldNumericKey($this->lowerExpr($expr->index));
-        return new ArrayAccess_($arr, $idx, Type::unknown());
+        $aa = new ArrayAccess_($arr, $idx, Type::unknown());
+        $aa->missThrows = $this->silenceDepth === 0;
+        return $aa;
     }
 
     /**
