@@ -157,6 +157,13 @@ class ArrayIterator implements SeekableIterator, ArrayAccess, Countable
         return $this->__st()[$o];
     }
 
+    /** The quiet fetch behind `$x[$k][$j] = $v` and `$x[$k][$j] ?? $d` (EmitLlvmArrays):
+     *  php's C handler creates a missing element without a warning. */
+    public function __mcGetW(mixed $o): mixed
+    {
+        return $this->offsetExists($o) ? $this->offsetGet($o) : null;
+    }
+
     public function offsetSet(mixed $o, mixed $v): void
     {
         if ($this->__o !== null) { $this->__o->offsetSet($o, $v); return; }
@@ -286,6 +293,13 @@ class ArrayObject implements IteratorAggregate, ArrayAccess, Countable
     public function offsetGet(mixed $o): mixed
     {
         return $this->__s[$o];
+    }
+
+    /** The quiet fetch behind `$x[$k][$j] = $v` and `$x[$k][$j] ?? $d` (EmitLlvmArrays):
+     *  php's C handler creates a missing element without a warning. */
+    public function __mcGetW(mixed $o): mixed
+    {
+        return $this->offsetExists($o) ? $this->offsetGet($o) : null;
     }
 
     public function offsetSet(mixed $o, mixed $v): void

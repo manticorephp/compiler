@@ -369,6 +369,10 @@ final class DemoteCharLocals
     /** @return Node[] */
     private function byteArgsOf(ArrayAccess_ $n): array
     {
+        // A read the source wrote still raises past either end: the third operand says so.
+        if ($n->missThrows && !$n->probe) {
+            return [$n->array, $n->index, new IntConst(1, Type::int_())];
+        }
         return [$n->array, $n->index];
     }
 

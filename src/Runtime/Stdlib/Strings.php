@@ -123,19 +123,19 @@ function __trim_impl(string $s, string $mask, int $mode): string
     return \substr($s, $i, $j - $i);
 }
 
-function ltrim(string $s, string $mask = " \t\n\r\0\x0B"): string
+function ltrim(string $string, string $characters = " \t\n\r\0\x0B"): string
 {
-    return __trim_impl($s, $mask, 1);
+    return __trim_impl($string, $characters, 1);
 }
 
-function rtrim(string $s, string $mask = " \t\n\r\0\x0B"): string
+function rtrim(string $string, string $characters = " \t\n\r\0\x0B"): string
 {
-    return __trim_impl($s, $mask, 2);
+    return __trim_impl($string, $characters, 2);
 }
 
-function trim(string $s, string $mask = " \t\n\r\0\x0B"): string
+function trim(string $string, string $characters = " \t\n\r\0\x0B"): string
 {
-    return __trim_impl($s, $mask, 3);
+    return __trim_impl($string, $characters, 3);
 }
 
 /**
@@ -336,31 +336,31 @@ function __mir_str_replace_one(string $search, string $replace, string $subject)
 // program (gated on `explode(` in Main.php) it return-narrows to vec[string].
 
 /** Uppercase the first character (1:1 with PHP `ucfirst`). */
-function ucfirst(string $s): string
+function ucfirst(string $string): string
 {
-    if (\strlen($s) === 0) { return $s; }
-    return \strtoupper(\substr($s, 0, 1)) . \substr($s, 1);
+    if (\strlen($string) === 0) { return $string; }
+    return \strtoupper(\substr($string, 0, 1)) . \substr($string, 1);
 }
 
 /** Lowercase the first character (1:1 with PHP `lcfirst`). */
-function lcfirst(string $s): string
+function lcfirst(string $string): string
 {
-    if (\strlen($s) === 0) { return $s; }
-    return \strtolower(\substr($s, 0, 1)) . \substr($s, 1);
+    if (\strlen($string) === 0) { return $string; }
+    return \strtolower(\substr($string, 0, 1)) . \substr($string, 1);
 }
 
 /** Uppercase the first letter of each word (PHP `ucwords`, default delimiters
  *  whitespace " \t\r\n\f\v"). */
-function ucwords(string $s, string $delimiters = " \t\r\n\x0C\x0B"): string
+function ucwords(string $string, string $separators = " \t\r\n\x0C\x0B"): string
 {
-    $n = \strlen($s);
-    $o = $s;
+    $n = \strlen($string);
+    $o = $string;
     $cap = true;
     $t = \str_repeat("\0", 256);
-    $m = \strlen($delimiters);
-    for ($k = 0; $k < $m; $k = $k + 1) { $t[\ord($delimiters[$k])] = "\1"; }
+    $m = \strlen($separators);
+    for ($k = 0; $k < $m; $k = $k + 1) { $t[\ord($separators[$k])] = "\1"; }
     for ($i = 0; $i < $n; $i = $i + 1) {
-        $c = \ord($s[$i]);
+        $c = \ord($string[$i]);
         if ($cap && $c >= 97 && $c <= 122) { $o[$i] = \chr($c - 32); }
         $cap = \ord($t[$c]) === 1;
     }
@@ -530,12 +530,12 @@ function strrchr(string $haystack, string $needle, bool $before_needle = false):
 }
 
 /** Reverse a string byte-wise (1:1 with PHP `strrev`). */
-function strrev(string $s): string
+function strrev(string $string): string
 {
-    $i = \strlen($s) - 1;
+    $i = \strlen($string) - 1;
     $out = "";
     while ($i >= 0) {
-        $out = $out . \substr($s, $i, 1);
+        $out = $out . \substr($string, $i, 1);
         $i = $i - 1;
     }
     return $out;
@@ -546,24 +546,24 @@ function strrev(string $s): string
  * 1 = STR_PAD_RIGHT (default), 2 = STR_PAD_BOTH — matching PHP's
  * constant values, so `str_pad($s, $n, $p, STR_PAD_LEFT)` works.
  */
-function str_pad(string $s, int $len, string $pad = " ", int $type = 1): string
+function str_pad(string $string, int $length, string $pad_string = " ", int $pad_type = 1): string
 {
-    $sl = \strlen($s);
-    if ($sl >= $len) { return $s; }
-    if (\strlen($pad) === 0) {
+    $sl = \strlen($string);
+    if ($sl >= $length) { return $string; }
+    if (\strlen($pad_string) === 0) {
         throw new \ValueError('str_pad(): Argument #3 ($pad_string) must not be empty');
     }
-    if ($type < 0 || $type > 2) {
+    if ($pad_type < 0 || $pad_type > 2) {
         throw new \ValueError('str_pad(): Argument #4 ($pad_type) must be STR_PAD_LEFT, STR_PAD_RIGHT, or STR_PAD_BOTH');
     }
-    $need = $len - $sl;
-    $full = \str_repeat($pad, \intdiv($need, \strlen($pad)) + 1);
-    if ($type === 0) { return \substr($full, 0, $need) . $s; }
-    if ($type === 2) {
+    $need = $length - $sl;
+    $full = \str_repeat($pad_string, \intdiv($need, \strlen($pad_string)) + 1);
+    if ($pad_type === 0) { return \substr($full, 0, $need) . $string; }
+    if ($pad_type === 2) {
         $left = \intval($need / 2);
-        return \substr($full, 0, $left) . $s . \substr($full, 0, $need - $left);
+        return \substr($full, 0, $left) . $string . \substr($full, 0, $need - $left);
     }
-    return $s . \substr($full, 0, $need);
+    return $string . \substr($full, 0, $need);
 }
 
 /**

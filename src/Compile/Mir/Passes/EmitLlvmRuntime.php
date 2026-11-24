@@ -1561,6 +1561,13 @@ trait EmitLlvmRuntime
         $out .= "  call void @__mir_cell_retain(i64 %pi)\n";
         $out .= "  br label %done\n";
         $out .= "hdr:\n";
+        // An enum case singleton (ENUM_TAG_MAGIC@-8) is immortal and may open a read-only
+        // section: `p-32` is not mapped there, so it is ruled out before the header probe.
+        $out .= "  %ep = getelementptr inbounds i8, ptr %p, i64 -8\n";
+        $out .= "  %ev = load i64, ptr %ep\n";
+        $out .= "  %isen = icmp eq i64 %ev, " . (string)\Compile\MemoryAbi::ENUM_TAG_MAGIC . "\n";
+        $out .= "  br i1 %isen, label %done, label %hdr2\n";
+        $out .= "hdr2:\n";
         $out .= "  %mp = getelementptr inbounds i8, ptr %p, i64 " . $mOff . "\n";
         $out .= "  %m = load i64, ptr %mp\n";
         $out .= "  %mm = and i64 %m, " . (string)\Compile\MemoryAbi::CLOSURE_MAGIC_MASK . "\n";
@@ -1612,6 +1619,13 @@ trait EmitLlvmRuntime
         $out .= "  call void @__mir_cell_drop(i64 %pi)\n";
         $out .= "  br label %done\n";
         $out .= "hdr:\n";
+        // An enum case singleton (ENUM_TAG_MAGIC@-8) is immortal and may open a read-only
+        // section: `p-32` is not mapped there, so it is ruled out before the header probe.
+        $out .= "  %ep = getelementptr inbounds i8, ptr %p, i64 -8\n";
+        $out .= "  %ev = load i64, ptr %ep\n";
+        $out .= "  %isen = icmp eq i64 %ev, " . (string)\Compile\MemoryAbi::ENUM_TAG_MAGIC . "\n";
+        $out .= "  br i1 %isen, label %done, label %hdr2\n";
+        $out .= "hdr2:\n";
         $out .= "  %mp = getelementptr inbounds i8, ptr %p, i64 " . $mOff . "\n";
         $out .= "  %m = load i64, ptr %mp\n";
         $out .= "  %mm = and i64 %m, " . (string)\Compile\MemoryAbi::CLOSURE_MAGIC_MASK . "\n";

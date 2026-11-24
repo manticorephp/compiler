@@ -3047,6 +3047,7 @@ trait EmitLlvmBuiltins
         // pass and the bug with it.
         $out .= $this->coerceIntArg($args[1]);
         $i = $this->lastValue;
+        if (\count($args) === 3) { $out .= $this->strOffsetRangeCheck($s, $i); }
         $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = call i64 @__mir_str_byte_at(ptr ' . $s
               . ', i64 ' . $i . ")\n";

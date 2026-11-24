@@ -1,1 +1,4 @@
-5,0
+5,OutOfBoundsException: Undefined array key "nope"
+dflt,unset
+Undefined array key 2
+1Undefined array key "x"

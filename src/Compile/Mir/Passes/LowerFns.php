@@ -141,6 +141,7 @@ trait LowerFns
             $fp->refOut = $outType !== null || isset($refOutNames[$p->name])
                 || $this->paramHasRefOutAttr($p);
             $fp->cellArg = isset($cellArgNames[$p->name]) || $this->paramHasCellArgAttr($p);
+            $fp->nullRejectHint = self::nullRejectHint($p);
             $params[] = $fp;
         }
         // A synthesized parameter-default factory lowers in its declaring class's scope.
@@ -255,6 +256,19 @@ trait LowerFns
     }
 
     /**
+     * The hint of a parameter that refuses null — `string`, `int`, `float` or `bool`,
+     * with no null default — else '' ({@see \Parser\Ast\Param::$nullRejectHint}).
+     */
+    private static function nullRejectHint(\Parser\Ast\Param $p): string
+    {
+        $h = \strtolower(\trim($p->typeHint ?? ''));
+        if ($h === '' || $p->byRef || $p->variadic) { return ''; }
+        if ($p->default instanceof \Parser\Ast\Expr && $p->default->kind === 'NullLiteral') { return ''; }
+        // ponytail: a single scalar only — a stdlib union (`int|string $key`) is often narrower than php's `mixed`.
+        return $h === 'string' || $h === 'int' || $h === 'float' || $h === 'bool' ? $h : '';
+    }
+
+    /**
      * Build a SIGNATURE-ONLY {@see FunctionDef} from a bundled-stdlib decl:
      * params (with defaults, for call-site filling) + return type, but an
      * empty body. EmitLlvm renders it as a `declare`; the body comes from the
@@ -309,6 +323,7 @@ trait LowerFns
             // the cross-module signal: a consumer sees only the interface, so this
             // is how fputcsv's element-consuming `$fields` reaches the caller.
             $fnp->cellArg = $this->paramCellArg($p) || isset($cellArgNames[$p->name]);
+            $fnp->nullRejectHint = $p->nullRejectHint;
             $params[] = $fnp;
         }
         $ext = new FunctionDef(

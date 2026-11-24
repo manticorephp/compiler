@@ -1,0 +1,5 @@
+unset dflt
+{"y":{"k":"v"},"z":[1],"q":{"n":3}}
+{"y":{"k":"v"}}
+Undefined array key "nope"
+Undefined array key "c"
