@@ -980,7 +980,21 @@ trait EmitLlvmRuntime
             // PossibleRoot). The collector's hooks are WEAK: this body is
             // linkonce_odr and must read the same in every module, and one
             // without the collector finds them null ({@see ccWeakHooks}).
-            $out .= "  %ccon = icmp ne ptr @__manticore_cc_add_root, null\n";
+            //
+            // The color sits in the word just decremented: an object already
+            // PURPLE (buffered) or GREEN (acyclic class) is one `cc_add_root`
+            // would leave untouched, so it never makes the call — 581M of the
+            // self-compile's root pushes were purple no-ops.
+            // PURPLE and GREEN differ in one color bit, so one mask with that
+            // bit cleared tests both: (word & mask) == PURPLE << shift.
+            $sh = \Compile\MemoryAbi::COLOR_SHIFT;
+            $colDiff = \Compile\MemoryAbi::COLOR_PURPLE ^ \Compile\MemoryAbi::COLOR_GREEN;
+            if (($colDiff & ($colDiff - 1)) !== 0) { throw new \LogicException("PURPLE/GREEN must differ in one color bit"); }
+            $out .= "  %kcm = and i64 %rc1, " . (string)(\Compile\MemoryAbi::COLOR_MASK & ~($colDiff << $sh)) . "\n";
+            $out .= "  %kskip = icmp eq i64 %kcm, " . (string)(\Compile\MemoryAbi::COLOR_PURPLE << $sh) . "\n";
+            $out .= "  %ccon0 = icmp ne ptr @__manticore_cc_add_root, null\n";
+            $out .= "  %kgo = xor i1 %kskip, true\n";
+            $out .= "  %ccon = and i1 %ccon0, %kgo\n";
             $out .= "  br i1 %ccon, label %addroot, label %done\n";
             $out .= "addroot:\n";
             $out .= "  call void @__manticore_cc_add_root(ptr %p)\n";
