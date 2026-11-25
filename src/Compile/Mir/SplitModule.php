@@ -653,7 +653,7 @@ final class SplitModule
                               array $defSize, array $assign, array $internal,
                               array $globalOrder, array $globals, array &$owned): PartPlan
     {
-        $plan = $this->closePart($p, $defOrder, $defRefs, $defSize, $assign, $internal,
+        $plan = $this->closePart($p, $defOrder, $defHead, $defRefs, $defSize, $assign, $internal,
                                  $globalOrder, $globals, $owned);
         $this->renderPart($plan, $p, $defHead, $assign, $internal, $globalOrder,
                           $globals);
@@ -666,6 +666,7 @@ final class SplitModule
      * owner pass runs this for every part before any part is rendered.
      *
      * @param string[]                            $defOrder
+     * @param array<string, string>               $defHead
      * @param array<string, array<string, bool>>  $defRefs
      * @param array<string, int>                  $defSize
      * @param array<string, int>                  $assign
@@ -674,7 +675,7 @@ final class SplitModule
      * @param array<string, string>               $globals
      * @param array<string, bool>                 $owned globals already defined by an earlier part
      */
-    private function closePart(int $p, array $defOrder, array $defRefs, array $defSize,
+    private function closePart(int $p, array $defOrder, array $defHead, array $defRefs, array $defSize,
                                array $assign, array $internal, array $globalOrder,
                                array $globals, array &$owned): PartPlan
     {
@@ -714,7 +715,12 @@ final class SplitModule
                 foreach ($defRefs[$s] as $r => $_) {
                     if (isset($availSet[$r]) || !isset($assign[$r]) || $assign[$r] === $p) { continue; }
                     $sz = $defSize[$r] ?? self::AVAIL_MAX_BYTES + 1;
-                    if ($sz > self::AVAIL_MAX_BYTES) { continue; }
+                    // An `alwaysinline` body comes along at any size: it exists to
+                    // be inlined, and ThinLTO's importer does not honour the
+                    // attribute across a part boundary — `__mir_array_index_find`
+                    // (~4 KB of IR) stayed a call from 33 sites, 8% of the
+                    // compiler's own self-compile profile.
+                    if ($sz > self::AVAIL_MAX_BYTES && !\str_contains($defHead[$r] ?? '', ' alwaysinline')) { continue; }
                     if ($depth > 0 && $availBytes + $sz > self::AVAIL_PART_BYTES) { continue; }
                     if ($this->namesInternal($defRefs[$r], $internal)) { continue; }
                     $availSet[$r] = true;

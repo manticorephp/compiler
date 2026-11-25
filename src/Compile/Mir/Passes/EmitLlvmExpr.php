@@ -1972,9 +1972,9 @@ trait EmitLlvmExpr
         $out .= "  br i1 %be, label %yes, label %chknum\n";
         $out .= "chknum:\n";
         $out .= "  %an = call i1 @__mir_is_numeric_str(ptr %a)\n";
-        $out .= "  %bn = call i1 @__mir_is_numeric_str(ptr %b)\n";
-        $out .= "  %both = and i1 %an, %bn\n";
-        $out .= "  br i1 %both, label %num, label %no\n";
+        $out .= "  br i1 %an, label %chkb, label %no\n";
+        $out .= "chkb:\n  %bn = call i1 @__mir_is_numeric_str(ptr %b)\n";
+        $out .= "  br i1 %bn, label %num, label %no\n";
         $out .= "num:\n";
         $out .= "  %da = call double @__mir_php_strtod(ptr %a, ptr null)\n";
         $out .= "  %db = call double @__mir_php_strtod(ptr %b, ptr null)\n";
