@@ -51,6 +51,9 @@ for f in tests/mysqli_net/cases/*.php; do
     fi
     act=$("$WORK/$n" 2>&1 | head -c 1000000); nrc=${PIPESTATUS[0]}
     rm -f "$WORK/$n" "$WORK/$n.log"
+    # the oracle php floats with the CI image; its patch release must not fail a case
+    exp=$(sed -E 's/mysqlnd [0-9]+\.[0-9]+\.[0-9]+/mysqlnd X.Y.Z/g; s/(client_version"?\]? *(=>|=) *)(int\()?[0-9]{5}/\1\3NNNNN/g' <<<"$exp")
+    act=$(sed -E 's/mysqlnd [0-9]+\.[0-9]+\.[0-9]+/mysqlnd X.Y.Z/g; s/(client_version"?\]? *(=>|=) *)(int\()?[0-9]{5}/\1\3NNNNN/g' <<<"$act")
     if [ "$nrc" != "$prc" ]; then echo "FAIL $n (native exit status $nrc, php $prc)"; fail=$((fail+1)); continue; fi
     # a case that printed its own assertion failure fails even when php printed the same
     if grep -q 'ASSERTION FAILED' <<<"$exp$act"; then echo "FAIL $n (the case reports a failed assertion)"; fail=$((fail+1)); continue; fi
