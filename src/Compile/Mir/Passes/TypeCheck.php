@@ -96,11 +96,23 @@ final class TypeCheck
     /** @var array<string, bool> `fn::name` of a `static` local: it may hold null whatever its slot type says */
     private array $staticLocals = [];
 
+    /** @var array<string, bool> stdlib externs and prelude functions: php's internal functions */
+    private array $internalFns = [];
+
+    /** @var array<string, array<int, string[]>> {@see Module::$builtinTwinNullReject} */
+    private array $twinNullReject = [];
+
+    /** The module is a library, or the prelude: internal code, whose calls php makes in C. */
+    private bool $libModule = false;
+
     public function run(Module $module): Module
     {
         $this->classes = $module->classes;
+        $this->twinNullReject = $module->builtinTwinNullReject;
+        $this->libModule = $module->isLibraryModule;
         foreach ($module->functions as $fn) {
             $this->paramsByFn[$fn->name] = $fn->params;
+            if ($fn->isExtern || $fn->isPrelude) { $this->internalFns[$fn->name] = true; }
             if ($fn->ffiSymbol !== null) { $this->ffiFns[$fn->name] = true; }
             if ($fn->claimOrigin !== '') { $this->claimFns[$fn->name] = true; }
             $this->returnTypes[$fn->name] = $module->declaredReturnTypes[$fn->name] ?? $fn->returnType;
@@ -128,6 +140,7 @@ final class TypeCheck
             if (!$this->reprOnly) { $this->checkArith($n, $inFn); }
         }
         if ($n->kind === Node::KIND_CALL) {
+            if (!$this->reprOnly) { $this->nullArgsToInternal($n, $inFn); }
             $this->nullArgsToScalar($n->function, $n, 0);
             $this->checkArgs($n->function, $n->function, $n->args, $inFn, 0, $n);
         } elseif ($n->kind === Node::KIND_NEW_OBJ) {
@@ -182,6 +195,57 @@ final class TypeCheck
                 new \Compile\Mir\StringConst($fnName . '(): Argument #' . (string)($ai + 1) . ' ($' . $p->name
                     . ') must be of type ' . $p->type->toString() . ', null given', Type::string_()),
             ], $p->type);
+        }
+    }
+
+    /**
+     * null into a parameter of an INTERNAL function (stdlib, prelude, a codegen builtin's
+     * twin) that refuses it: php 8 deprecates and coerces, the project throws php 9's
+     * TypeError (#751), `strlen(): Argument #1 ($string) must be of type string, null given`.
+     * A literal null throws outright; a local is tested where the call reads it
+     * (`is_null($s) ? throw : $s`). Internal code calling internal code is php's C: no check.
+     */
+    private function nullArgsToInternal(Node $call, string $inFn): void
+    {
+        if ($this->libModule || isset($this->internalFns[$inFn])) { return; }
+        $fn = $call->function;
+        /** @var array<int, string[]> $reject */
+        $reject = [];
+        if (isset($this->internalFns[$fn])) {
+            foreach ($this->paramsByFn[$fn] as $pi => $p) {
+                if ($p->nullRejectHint !== '') { $reject[$pi] = [$p->name, $p->nullRejectHint]; }
+            }
+        } elseif (isset($this->twinNullReject[$fn])) {
+            $reject = $this->twinNullReject[$fn];
+        } elseif ($fn === 'substr') {
+            // ponytail: codegen builtins older than the twin rule have no PHP body to read the hints from.
+            $reject = [0 => ['string', 'string'], 1 => ['offset', 'int']];
+        } elseif ($fn === 'round') {
+            $reject = [0 => ['num', 'int|float']];
+        }
+        if ($reject === []) { return; }
+        foreach ($call->args as $ai => $arg) {
+            if ($arg->kind === Node::KIND_SPREAD) { return; }
+            if (!isset($reject[$ai])) { continue; }
+            $hint = $reject[$ai][1];
+            $k = $arg->type->kind;
+            $msg = new \Compile\Mir\StringConst(\ltrim($fn, '\\') . '(): Argument #' . (string)($ai + 1) . ' ($'
+                . $reject[$ai][0] . ') must be of type ' . $hint . ', null given', Type::string_());
+            if ($k === Type::KIND_NULL) {
+                $call->args[$ai] = new Call('__mir_throw_type_error', [$msg], $arg->type);
+                continue;
+            }
+            // ponytail: only a local is tested — another operand would be evaluated twice; a temp is the upgrade.
+            if ($arg->kind !== Node::KIND_LOAD_LOCAL) { continue; }
+            if (!($k === Type::KIND_CELL || ($k === Type::KIND_STRING && $hint === 'string'))) { continue; }
+            $t = new \Compile\Mir\Ternary(
+                new Call('is_null', [$arg], Type::bool_()),
+                new Call('__mir_throw_type_error', [$msg], $arg->type),
+                new \Compile\Mir\LoadLocal($arg->name, $arg->type),
+                $arg->type,
+            );
+            $t->line = $arg->line;
+            $call->args[$ai] = $t;
         }
     }
 

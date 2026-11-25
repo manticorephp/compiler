@@ -17,4 +17,6 @@ var_dump(isset($s[-1]));
 var_dump(isset($s[-100]));
 $empty = "";
 var_dump(isset($empty[0]));
-echo "[", $s[100], "]\n";            // out-of-range read → ""
+try { echo "[", $s[100], "]\n"; }     // out-of-range read: php warns, Manticore throws
+catch (\OutOfBoundsException $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
+echo "[", @$s[100], "]\n";           // silenced: ""

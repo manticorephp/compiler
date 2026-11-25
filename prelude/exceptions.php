@@ -191,6 +191,37 @@ function __mir_shape_type_error(mixed $v, string $where, string $expected): void
 }
 
 /**
+ * The miss path of an element READ: php warns `Undefined array key …` and reads
+ * null; where Zend warns, Manticore throws (#718). One per key channel the IR
+ * read used ({@see \Compile\Mir\Passes\EmitLlvmArrays::emitMissThrowingRead}),
+ * never called from PHP source. A string key spelling a canonical int is that
+ * int key, and php names it unquoted.
+ */
+function __mir_undefined_key_int(int $k): void
+{
+    throw new OutOfBoundsException('Undefined array key ' . $k);
+}
+
+function __mir_undefined_key_str(string $k): void
+{
+    if ((string)(int)$k === $k) { __mir_undefined_key_int((int)$k); }
+    throw new OutOfBoundsException('Undefined array key "' . $k . '"');
+}
+
+function __mir_undefined_key_cell(mixed $k): void
+{
+    if (\is_string($k)) { __mir_undefined_key_str($k); }
+    if ($k === null) { __mir_undefined_key_str(''); }
+    __mir_undefined_key_int((int)$k);
+}
+
+/** `$s[$i]` past either end: php warns `Uninitialized string offset N` and reads "". */
+function __mir_uninit_str_offset(int $i): void
+{
+    throw new OutOfBoundsException('Uninitialized string offset ' . $i);
+}
+
+/**
  * A typed property bound by reference to a param of another scalar type —
  * php refuses the binding. `$head` / `$tail` frame the value's type, the one
  * runtime part. Called from the IR ({@see \Compile\Mir\Passes\EmitLlvmLocals::

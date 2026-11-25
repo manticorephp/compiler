@@ -125,7 +125,7 @@ final class BuildCommand extends Command
             }
             /** @var string[] $excludes */
             $excludes = [];
-            foreach ($app["exclude"] as $e) {
+            foreach ($app["exclude"] ?? [] as $e) {
                 $excludes[] = (string)$e;
             }
             // Explicit entry point: the file whose top-level code becomes the
@@ -283,7 +283,7 @@ final class BuildCommand extends Command
             // (`-l<lib>`). Declared under the manifest's top-level "extensions".
             $extDefs = isset($manifest["extensions"]) ? $manifest["extensions"] : [];
             $linkFlags = "";
-            foreach ($app["extensions"] as $extName) {
+            foreach ($app["extensions"] ?? [] as $extName) {
                 $en = (string)$extName;
                 if (!isset($extDefs[$en])) {
                     \Manticore\dprint("build: app '" . $name . "' wants unknown extension '" . $en . "'");
@@ -295,7 +295,7 @@ final class BuildCommand extends Command
                     $sources[] = \Manticore\__mc_source_contents($sf);
                     $paths[] = \Manticore\__mc_source_path($sf);
                 }
-                foreach ($ext["link"] as $lib) {
+                foreach ($ext["link"] ?? [] as $lib) {
                     $linkFlags = $linkFlags . " -l" . (string)$lib;
                 }
                 \Manticore\dprint("build: + extension '" . $en . "' (" . $extSrc . ")");
@@ -470,7 +470,7 @@ final class BuildCommand extends Command
             $output = (string)$lib["output"];
             /** @var string[] $excludes */
             $excludes = [];
-            foreach ($lib["exclude"] as $e) {
+            foreach ($lib["exclude"] ?? [] as $e) {
                 $excludes[] = (string)$e;
             }
             \Manticore\dprint("build: library '" . $name . "' (" . $srcDir . " -> " . $output . ")");

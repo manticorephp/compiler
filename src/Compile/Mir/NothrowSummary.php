@@ -485,6 +485,7 @@ final class NothrowSummary
         if ($k === Node::KIND_ARRAY_ACCESS) {
             $a = self::asArrayAccess($n);
             if ($a->shapeCheck !== 0) { return 'shape check'; }
+            if ($a->missThrows && !$a->probe) { return 'missing key'; }
             return $a->array->type->kind === Type::KIND_ARRAY && self::key($a->index->type) ? '' : 'offset read';
         }
         if ($k === Node::KIND_STORE_ELEMENT) {
@@ -646,6 +647,9 @@ final class NothrowSummary
             if (\count($args) !== 2 || $args[1]->kind !== Node::KIND_INT_CONST || self::asIntConst($args[1])->value < 0) {
                 return false;
             }
+        } elseif ($fn === '__str_byte_at') {
+            // A third operand: the read raises past either end ({@see Passes\DemoteCharLocals}).
+            if (\count($args) !== 2) { return false; }
         } elseif ($fn === 'explode') {
             if (\count($args) < 2 || $args[0]->kind !== Node::KIND_STRING_CONST || self::asStringConst($args[0])->value === '') {
                 return false;

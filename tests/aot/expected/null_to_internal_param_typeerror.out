@@ -1,0 +1,14 @@
+strtoupper(): Argument #1 ($string) must be of type string, null given
+trim(): Argument #1 ($string) must be of type string, null given
+str_repeat(): Argument #2 ($times) must be of type int, null given
+round(): Argument #1 ($num) must be of type int|float, null given
+str_pad(): Argument #1 ($string) must be of type string, null given
+strlen(): Argument #1 ($string) must be of type string, null given
+n0|
+AB|
+ab|
+aa|
+2|
+ab |
+strlen(): Argument #1 ($string) must be of type string, null given
+ab2|
