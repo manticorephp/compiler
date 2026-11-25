@@ -240,13 +240,14 @@ final class InferTypes implements Pass
 
     private function bodyHas(FunctionDef $fn, string $kind): bool
     {
-        $set = $this->bodyKinds[$fn->name] ?? null;
-        if ($set === null) {
+        // Read in place: copying the per-body set out (`$set = $this->bodyKinds[…]`)
+        // retains and releases it on every call, and this runs millions of times.
+        if (!isset($this->bodyKinds[$fn->name])) {
             $set = [];
             $this->collectBodyKinds($fn->body, $set);
             $this->bodyKinds[$fn->name] = $set;
         }
-        return isset($set[$kind]);
+        return isset($this->bodyKinds[$fn->name][$kind]);
     }
 
     /**
