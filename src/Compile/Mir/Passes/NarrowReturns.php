@@ -202,9 +202,35 @@ final class NarrowReturns implements Pass
             // inference moves.
             if ($this->analysis !== null) { $this->analysis->beginRound(); }
             $infer = new InferTypes($scope, $this->analysis);
+            $infer->closePropHops = !$this->concreteOnly;
             $typesBefore = $this->needsFullInfer ? $infer->fingerprintAll($module) : [];
+            $probeMoved = $this->needsFullInfer && \getenv('MANTICORE_NARROW_MOVED') === '1';
+            /** @var array<string, string[]> $probeDumps */
+            $probeDumps = [];
+            if ($probeMoved) {
+                foreach ($module->functions as $pf) { $probeDumps[$pf->name] = $infer->typeDump($pf); }
+            }
             $infer->run($module);
             $lastRunMoved = $this->needsFullInfer && $infer->fingerprintAll($module) !== $typesBefore;
+            if ($probeMoved) {
+                $typesAfter = $infer->fingerprintAll($module);
+                $pm = 0;
+                foreach ($typesAfter as $pn => $pfp) {
+                    if (($typesBefore[$pn] ?? 0) === $pfp) { continue; }
+                    $pm = $pm + 1;
+                    if ($pm > 6) { continue; }
+                    foreach ($module->functions as $pf2) {
+                        if ($pf2->name !== $pn) { continue; }
+                        $now = $infer->typeDump($pf2);
+                        $was = $probeDumps[$pn] ?? [];
+                        $di = 0;
+                        while ($di < \count($now) && $di < \count($was) && $now[$di] === $was[$di]) { $di = $di + 1; }
+                        \Compile\Stats::line('  moved: ' . $pn . ' @' . (string)$di . ' `' . ($was[$di] ?? '-') . '` -> `' . ($now[$di] ?? '-') . '`');
+                        break;
+                    }
+                }
+                \Compile\Stats::line('  moved: round ' . (string)$iters . ' ' . (string)$pm . ' function(s)');
+            }
             $this->moduleTyped = $scope === null;
             $lastLight = false;
             $light = ($scope === null && $this->analysis === null) ? $infer : null;
@@ -275,6 +301,7 @@ final class NarrowReturns implements Pass
             throw new \RuntimeException('NarrowReturns: no fixpoint after ' . (string)$max
                 . ' rounds; still re-typed: ' . \implode(' ', \array_slice(\array_keys($narrowedNames), 0, 12)));
         }
+        if (!$this->concreteOnly) { InferTypes::dropSettledBoxBacks($module); }
         $module->markPassApplied(self::NAME);
         return $module;
     }

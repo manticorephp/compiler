@@ -323,6 +323,7 @@ final class EscapeSummaries
         //    component reaches every other, so its answer is ONE: the members'
         //    own effects and everything its outside callees (already final) do.
         $sccs = CallGraphScc::components($names, $callees);
+        if (\Compile\Stats::reporting()) { \Compile\Stats::line(CallGraphScc::shape($sccs, $callees)); }
         foreach ($sccs as $scc) {
             /** @var array<string, bool> $inScc */
             $inScc = [];

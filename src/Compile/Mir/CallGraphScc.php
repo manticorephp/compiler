@@ -87,4 +87,38 @@ final class CallGraphScc
         }
         return $out;
     }
+
+    /**
+     * One stats line on the shape of the components: the largest, how many
+     * functions sit in a component of two or more, and the longest chain of
+     * components (callees first, so each depth is final when it is read).
+     *
+     * @param string[][] $sccs from {@see components}
+     * @param array<string, string[]> $callees
+     */
+    public static function shape(array $sccs, array $callees): string
+    {
+        /** @var array<string, int> $depth */
+        $depth = [];
+        $largest = 0;
+        $inCycles = 0;
+        $maxDepth = 0;
+        foreach ($sccs as $scc) {
+            $n = \count($scc);
+            if ($n > $largest) { $largest = $n; }
+            if ($n > 1) { $inCycles = $inCycles + $n; }
+            $d = 0;
+            foreach ($scc as $m) {
+                foreach ($callees[$m] as $c) {
+                    $cd = $depth[$c] ?? 0;
+                    if ($cd > $d) { $d = $cd; }
+                }
+            }
+            $d = $d + 1;
+            foreach ($scc as $m) { $depth[$m] = $d; }
+            if ($d > $maxDepth) { $maxDepth = $d; }
+        }
+        return "call-graph sccs: largest=" . (string)$largest . " in-cycles=" . (string)$inCycles
+            . " depth=" . (string)$maxDepth;
+    }
 }
