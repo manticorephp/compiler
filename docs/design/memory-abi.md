@@ -286,6 +286,14 @@ not validated, so a library built with another hash or word format misses keys i
 arrays it built. A value copy (`__mir_array_copy_bare`) holds the same entries at the same
 positions and duplicates the source's index verbatim instead of resetting it.
 
+The index is built lazily (first lookup on a map of 8+ entries, at `n_buckets >= 2*len`)
+and kept up by `__mir_array_index_add` on every append. Past 0.7 load it DOUBLES IN PLACE:
+each word already names its home, so the old side-array is rehashed without touching an
+entry or a key. (It used to drop the index and let the next lookup rebuild it from the
+entries; on the compiler's self-compile that was 8.6M of 15.2M rebuilds and 217M of 279M
+rebuilt entries.) Measured on the self-compile: 525M probes-for-a-key, 2.0 slots each,
+tag-only rejection is exact (hits == tag matches), 27% of hits need a byte compare.
+
 `IMMORTAL_ARRAY_RC = 1 << 62` is baked into the empty-array singleton. It is deliberately
 **not** `-1`: COW's `sle rc, 1` and release's `sle rc, 0` must both stay false, and the
 string immortal encoding would make COW mutate the shared singleton and release free it
@@ -453,6 +461,11 @@ Emitted symbols:
 
 Global state: `@__manticore_cc_roots`, `@__manticore_cc_count`, `@__manticore_cc_cap`,
 `@__manticore_cc_children`, `@__manticore_cc_freed`.
+
+`__mir_rc_release` reads the color from the rc word it just decremented and calls
+`cc_add_root` only when the object is neither PURPLE (already buffered) nor GREEN (acyclic
+class) — the two colors `cc_add_root` returns on at once. On the self-compile 581M of 583M
+root pushes were such no-ops.
 
 **Triggering is manual only.** `gc_collect_cycles()` is the sole entry point; there is no
 threshold heartbeat and no safe-point trigger, and the collector does not scan static or

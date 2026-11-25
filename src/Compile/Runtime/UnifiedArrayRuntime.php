@@ -1032,8 +1032,8 @@ final class UnifiedArrayRuntime
      * appended entry `j` to the bucket index, instead of dropping it. Keeps a
      * large string-keyed BUILD O(n) (a drop-on-every-append rebuilds the index
      * O(n) on the next lookup → O(n²)). No index yet (nbuckets==0) → no-op
-     * (lazy-built on first lookup). Past ~0.7 load factor → drop (the next
-     * lookup rebuilds bigger; capacities double, so amortized O(1) per append).
+     * (lazy-built on first lookup). Past ~0.7 load factor → double the index in
+     * place from its own bucket words ({@see emitIndexGrow}), amortized O(1) per append.
      */
     private function emitIndexAdd(): void
     {
@@ -1060,11 +1060,22 @@ final class UnifiedArrayRuntime
         $lhs = $chk->mul($len, Value::int(Type::i64(), 10));
         $rhs = $chk->mul($nb, Value::int(Type::i64(), 7));
         $chk->brIf($chk->icmp('sge', $lhs, $rhs), $full, $go);
-        $full->call('__mir_array_index_drop', Type::void(), [$arr]);
-        $full->br($ret);
+        $grow = $fn->block('grow');
+        if (Debug::$arenaArrays) {
+            // An arena array's side-array is arena memory: keep the drop + lazy rebuild there.
+            $fullDrop = $fn->block('full_drop');
+            $atag = $full->load(Type::i64(), $this->hdr($full, $arr, MemoryAbi::RC_TAG_OFFSET));
+            $full->brIf($full->icmp('eq', $atag, Value::int(Type::i64(), MemoryAbi::ARRAY_TAG_ARENA)), $fullDrop, $grow);
+            $fullDrop->call('__mir_array_index_drop', Type::void(), [$arr]);
+            $fullDrop->br($ret);
+        } else {
+            $full->br($grow);
+        }
+        $this->emitIndexGrow($fn, $grow, $arr, $nb, $go);
 
+        $nbNow = $go->load(Type::i64(), $nbAddr);
         $buckets = $go->load(Type::ptr(), $this->hdr($go, $arr, MemoryAbi::ARRAY_BUCKETS_PTR_OFFSET));
-        $mask = $go->sub($nb, Value::int(Type::i64(), 1));
+        $mask = $go->sub($nbNow, Value::int(Type::i64(), 1));
         $hSlot = $go->alloca(Type::i64(), 'h');
         $sSlot = $go->alloca(Type::i64(), 's');
         $kind = $go->load(Type::i64(), $this->entryAddr($go, $arr, $j, MemoryAbi::ARRAY_ENTRY_KIND_OFFSET));
@@ -1090,6 +1101,55 @@ final class UnifiedArrayRuntime
         $put->store($this->packBucket($put, $put->load(Type::i64(), $hSlot), $put->add($j, Value::int(Type::i64(), 1))), $putAddr);
         $put->br($ret);
         $ret->retVoid();
+    }
+
+    /**
+     * Double a full bucket index IN PLACE, then continue at `$then`. Each word
+     * carries its own home (`h32`, {@see packBucket}), so the rehash walks the
+     * old side-array alone: no entry, key or hash is touched. It replaces the
+     * drop + lazy rebuild, which re-read every entry and its key's hash on the
+     * next lookup — 8.6M rebuilds over 279M entries in one self-compile.
+     */
+    private function emitIndexGrow(FunctionDef $fn, Block $grow, Value $arr, Value $nb, Block $then): void
+    {
+        $rhead = $fn->block('grow_head');
+        $rbody = $fn->block('grow_body');
+        $rprobe = $fn->block('grow_probe');
+        $rscan = $fn->block('grow_scan');
+        $rstep = $fn->block('grow_step');
+        $rput = $fn->block('grow_put');
+        $rnext = $fn->block('grow_next');
+        $rdone = $fn->block('grow_done');
+        $oldb = $grow->load(Type::ptr(), $this->hdr($grow, $arr, MemoryAbi::ARRAY_BUCKETS_PTR_OFFSET));
+        $nb2 = $grow->shl($nb, Value::int(Type::i64(), 1));
+        $bytes = $grow->mul($nb2, Value::int(Type::i64(), 8));
+        $this->profBucket($grow);
+        $nbk = $this->poolAlloc($grow, $bytes);
+        $grow->call('memset', Type::ptr(), [$nbk, Value::int(Type::i32(), 0), $bytes]);
+        $mask2 = $grow->sub($nb2, Value::int(Type::i64(), 1));
+        $iSlot = $grow->alloca(Type::i64(), 'gi');
+        $sSlot = $grow->alloca(Type::i64(), 'gs');
+        $grow->store(Value::int(Type::i64(), 0), $iSlot);
+        $grow->br($rhead);
+        $i = $rhead->load(Type::i64(), $iSlot);
+        $rhead->brIf($rhead->icmp('sge', $i, $nb), $rdone, $rbody);
+        $w = $rbody->load(Type::i64(), $rbody->gep(Type::i64(), $oldb, [$i]));
+        $rbody->brIf($rbody->icmp('eq', $w, Value::int(Type::i64(), 0)), $rnext, $rprobe);
+        $rprobe->store($rprobe->and_($rprobe->lshr($w, Value::int(Type::i64(), 32)), $mask2), $sSlot);
+        $rprobe->br($rscan);
+        $s = $rscan->load(Type::i64(), $sSlot);
+        $bv = $rscan->load(Type::i64(), $rscan->gep(Type::i64(), $nbk, [$s]));
+        $rscan->brIf($rscan->icmp('eq', $bv, Value::int(Type::i64(), 0)), $rput, $rstep);
+        $rstep->store($rstep->and_($rstep->add($s, Value::int(Type::i64(), 1)), $mask2), $sSlot);
+        $rstep->br($rscan);
+        $rput->store($w, $rput->gep(Type::i64(), $nbk, [$rput->load(Type::i64(), $sSlot)]));
+        $rput->br($rnext);
+        $rnext->store($rnext->add($rnext->load(Type::i64(), $iSlot), Value::int(Type::i64(), 1)), $iSlot);
+        $rnext->br($rhead);
+        $this->poolFree($rdone, $oldb);
+        $rdone->store($nb2, $this->hdr($rdone, $arr, MemoryAbi::ARRAY_NBUCKETS_OFFSET));
+        $rdone->store($nbk, $this->hdr($rdone, $arr, MemoryAbi::ARRAY_BUCKETS_PTR_OFFSET));
+        $rdone->br($then);
     }
 
     /**

@@ -5088,8 +5088,10 @@ entry:
      * carries, together with `@__mir_php_strtod(ptr s, ptr end)`: strtod with
      * php's reading. libc's also reads hex (`0x1A` → 26), `inf`/`infinity`
      * and `nan`, none of which php calls a number — `(float)"0x1A"` is 0.0 and
-     * `is_numeric("inf")` false. Past the leading whitespace and sign, an `i` or
-     * `n` converts nothing (+0.0, `*end = s`), and `0x` stops after the `0`
+     * `is_numeric("inf")` false. Past the leading whitespace and sign, a byte that
+     * is neither a digit nor `.` converts nothing (+0.0, `*end = s`) without the
+     * libc call — the common non-numeric string of a loose `==` never reaches
+     * strtod and its `localeconv_l` — and `0x` stops after the `0`
      * (a signed zero); every other input is libc's own decimal parse. Every
      * php-level conversion calls this, never `@strtod` directly.
      */
@@ -5117,11 +5119,11 @@ sgn:
   %p2 = getelementptr inbounds i8, ptr %p, i64 1
   %q = select i1 %issg, ptr %p2, ptr %p
   %d = load i8, ptr %q
-  %dl = or i8 %d, 32
-  %isi = icmp eq i8 %dl, 105
-  %isn = icmp eq i8 %dl, 110
-  %word = or i1 %isi, %isn
-  br i1 %word, label %none, label %chk0
+  %dd = sub i8 %d, 48
+  %isdig = icmp ult i8 %dd, 10
+  %isdot = icmp eq i8 %d, 46
+  %numst = or i1 %isdig, %isdot
+  br i1 %numst, label %chk0, label %none
 chk0:
   %is0 = icmp eq i8 %d, 48
   br i1 %is0, label %chkx, label %libc
