@@ -202,6 +202,7 @@ final class NarrowReturns implements Pass
             // inference moves.
             if ($this->analysis !== null) { $this->analysis->beginRound(); }
             $infer = new InferTypes($scope, $this->analysis);
+            $infer->closePropHops = !$this->concreteOnly;
             $typesBefore = $this->needsFullInfer ? $infer->fingerprintAll($module) : [];
             $probeMoved = $this->needsFullInfer && \getenv('MANTICORE_NARROW_MOVED') === '1';
             /** @var array<string, string[]> $probeDumps */
@@ -300,6 +301,7 @@ final class NarrowReturns implements Pass
             throw new \RuntimeException('NarrowReturns: no fixpoint after ' . (string)$max
                 . ' rounds; still re-typed: ' . \implode(' ', \array_slice(\array_keys($narrowedNames), 0, 12)));
         }
+        if (!$this->concreteOnly) { InferTypes::dropSettledBoxBacks($module); }
         $module->markPassApplied(self::NAME);
         return $module;
     }

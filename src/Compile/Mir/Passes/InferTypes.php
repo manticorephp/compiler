@@ -98,6 +98,13 @@ final class InferTypes implements Pass
     private ?array $scopeNames = null;
     private ?\Compile\Mir\AnalysisContext $ctx = null;
 
+    /**
+     * Close the parameter → property → reader hop inside the run. Only the late
+     * {@see NarrowReturns}: earlier, a widening that arrives a run sooner changes
+     * what {@see Monomorphize} clones.
+     */
+    public bool $closePropHops = false;
+
     public function __construct(?\Compile\Mir\InferenceScope $scope = null,
                                 ?\Compile\Mir\AnalysisContext $ctx = null)
     {
@@ -1683,6 +1690,30 @@ final class InferTypes implements Pass
             $this->rescanPropagating($module, 'byref_capture_post');
             $guard = $guard + 1;
         }
+        // Close the parameter → property → reader hop inside this run. A
+        // call-site scan widens a bare-`array` parameter, the parameter's store
+        // types the property only in the NEXT run's pre-scan, and the readers
+        // of the property move one run later still: one hop per full run, and
+        // every hop a whole-module inference. Re-run the two scans here until
+        // neither moves, so the next run starts from where this one would end.
+        $tailGuard = 0;
+        while ($this->closePropHops && $tailGuard < 32) {
+            $tailGuard = $tailGuard + 1;
+            $moved = false;
+            $this->retypedProps = [];
+            $this->scanCellElemProps($module);
+            if ($this->retypedProps !== []) {
+                $this->inferAfterPropScan($module, 'cell_elem_prop_tail');
+                $moved = true;
+            }
+            $this->rescanTouched = [];
+            $this->rescanProps = [];
+            if ($this->scanCallSiteArrayElems($module)) {
+                $this->rescanPropagating($module, 'callsite_array_tail');
+                $moved = true;
+            }
+            if (!$moved) { break; }
+        }
         // A static slot's default never belongs to a function: `self::D + [...]` would stay an int `+`.
         foreach ($module->globalDefaults as $gd) {
             if ($gd->kind !== Node::KIND_ADD) { continue; }
@@ -3023,6 +3054,53 @@ final class InferTypes implements Pass
             return $i;
         }
         return -1;
+    }
+
+    /**
+     * Drop every planted box-back that boxes nothing: a `$x = $x` stored cell over
+     * a read of `$x` that is itself cell. A plant is sticky (`declaredType`), so a
+     * merge that disagreed only in some intermediate run of the fixpoint leaves
+     * one behind after the local settled on cell; how many such leftovers a body
+     * carries then depends on the path to the fixpoint, not on the fixpoint.
+     * Run once, after the last inference.
+     */
+    public static function dropSettledBoxBacks(Module $module): void
+    {
+        foreach ($module->functions as $fn) { self::dropSettledIn($fn->body); }
+    }
+
+    private static function dropSettledIn(Node $n): void
+    {
+        if ($n instanceof Block) { $n->stmts = self::withoutSettled($n->stmts); }
+        if ($n instanceof Switch_) {
+            foreach ($n->arms as $arm) { $arm->body = self::withoutSettled($arm->body); }
+        }
+        if ($n instanceof TryCatch_) {
+            $n->tryBody = self::withoutSettled($n->tryBody);
+            foreach ($n->catches as $c) { $c->body = self::withoutSettled($c->body); }
+            $n->finallyBody = self::withoutSettled($n->finallyBody);
+        }
+        foreach (Walk::children($n) as $c) { self::dropSettledIn($c); }
+    }
+
+    /** @param Node[] $stmts
+     *  @return Node[] */
+    private static function withoutSettled(array $stmts): array
+    {
+        $out = [];
+        $dropped = false;
+        foreach ($stmts as $st) {
+            if ($st instanceof StoreLocal && $st->declaredType !== null
+                && $st->declaredType->kind === Type::KIND_CELL
+                && $st->type->kind === Type::KIND_CELL
+                && self::selfStoreName($st) !== ''
+                && $st->value->type->kind === Type::KIND_CELL) {
+                $dropped = true;
+                continue;
+            }
+            $out[] = $st;
+        }
+        return $dropped ? $out : $stmts;
     }
 
     /** The name of a `$x = $x` self-store, '' for any other statement. */

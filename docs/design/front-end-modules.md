@@ -334,6 +334,55 @@ are gone.
 - **Measurement.** The ~70 s in #817 does not match the 35–40 s measured here.
   Re-measure on an idle host before committing to targets.
 
+## Results
+
+### Stage 1: the property hop closed inside a run
+
+`InferTypes::$closePropHops`, set only by the late `NarrowReturns`: after the
+post-walk scans, `scanCellElemProps` (re-infer the readers of what it retyped) and
+`scanCallSiteArrayElems` (re-infer what it widened) re-run until neither moves.
+The hop that took one full run each now closes in the run that started it.
+
+- **Only the late pass.** Enabled from `InferTypes #1` on, the earlier widening
+  reached `Monomorphize`, which then cloned 12 more functions (9 900 → 9 912) and
+  the program grew ~800 more `cell` nodes. A widening that arrives a run sooner is
+  a different input to a non-monotone step, so the tail stays after the last
+  clone decision.
+- **The output did differ at first, in one function.** `LowerFromAst::run` lost
+  two dead loads: one box-back fewer. Cause: a box-back (`$x = $x` stored cell,
+  `InferTypes::planMergeShadow`) is sticky by design (`declaredType`). A
+  merge that disagreed only in an *intermediate* run of the fixpoint leaves one
+  behind, and once the local settles on cell it boxes nothing. How many such
+  leftovers a body carries depends on the path to the fixpoint, so any change in
+  the number of runs changes the IR. `InferTypes::dropSettledBoxBacks` removes
+  them once after the late `NarrowReturns` (a store typed cell, declared cell,
+  over a read of the same local that is cell). On `src/` that is ~675 no-op
+  stores. It is a precondition of every later stage: none of them can be
+  byte-identical without it.
+- **Proof.** One binary with temporary switches for both halves, same `src/`:
+  `dump-llvm-mir src` (313 MB) with the tail on and off is byte-identical once
+  the leftovers are dropped (`c9087f54…` both), and so is a full typed-node dump of
+  every function plus every property type. Without the drop the two differ, as
+  above. The final binary matches the switched one with the tail off
+  (`5eba6657…`). `bin/build` ×3: gen1 = gen2 = gen3 (`c716dd53`).
+- **Gates.** `tests/aot/run.sh -k` infer 2, narrow 14, generic 17, closure 120,
+  return 75, box 15, merge 19, cell 164, foreach 90, loop 45: all pass.
+- **Time** (`build --apps-only` of the compiler, `MANTICORE_OBJ_CACHE=0`, `-j 9`,
+  base = parent commit, non-PGO both, A B A B, best of 2, load average 16–37):
+
+| | base | stage 1 | Δ |
+|---|---:|---:|---:|
+| NarrowReturns (full) | 17.5 s | 10.9 s | −6.6 s |
+| front end, to `Verify` | 32.7 s | 26.3 s | −6.4 s |
+| total CPU (user) | 284 s | 275 s | −9 s |
+| wall | 77.8 s | 70.6 s | −7.2 s |
+| peak RSS | 2 774 MB | 2 686 MB | −88 MB |
+
+  Four full runs remain in the late pass (rounds 1, 7, 11, 13), against nine.
+  The tail itself costs ≈ 1 s in rounds 1 and 7. `--backend=native` is not on
+  this branch (no native backend on `main` yet); the front end it would share is
+  the one measured here.
+
 ## Staged plan
 
 0. **Measure** (this doc): `MANTICORE_NARROW_MOVED`, the `call-graph sccs:` stats
