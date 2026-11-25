@@ -383,6 +383,47 @@ The hop that took one full run each now closes in the run that started it.
   this branch (no native backend on `main` yet); the front end it would share is
   the one measured here.
 
+### Stage 2: targeted closing runs — measured, not landed
+
+Tried: a full run that closes light rounds (rounds 7, 11, 13) walks only what the
+light rounds visited plus what was narrowed since the last full run, plus the
+readers of every property a pre-scan retyped, following moves to neighbours
+(`inferPropagating`). Every scan still ran over the whole module. Checked with a
+harness that re-walks every function after the targeted walk and names the ones
+that move (a "miss").
+
+1. **The walk is not idempotent against the post-walk scans.** 136, 190 and 188
+   functions moved on a plain re-walk in the three closing runs, although none
+   of their inputs had changed. A full walk *undoes* what the previous run's
+   scans derived and the same run's scans derive it again: local element widening
+   (`forcedCellElemLocals`, `rescan local_elem` re-infers ~204 functions in every
+   run), static-local joins (`staticLocalTypes`), assoc-key flips, closure capture
+   seeds. 322 of the misses were `vec[cell] → vec[unknown]` on a local.
+   Skipping the walk for a function leaves it in its post-scan state while the
+   scans then run on a different intermediate state. The fixpoint was reached by a
+   different path, with one more full run, and the IR differed in one closure.
+2. **Inheriting those facts from the previous run** (`forcedCellElemLocals`,
+   `staticLocalTypes`) cut the misses to 8, 6 and 0 (assoc-key flips and closure
+   bodies remain). The IR then came out byte-identical, but the typed state after
+   the pass still differed in two functions (`assoc` vs `vec` on a local), the
+   path still took one extra full run, and `NarrowReturns (full)` cost the same
+   (10.96 s vs 10.99 s). Inheriting the facts into *full* runs instead saved
+   0.6 s but changed the IR: a fact derived in an intermediate state is not always
+   derived again at the fixpoint, the same history dependence as the box-back
+   leftovers of stage 1.
+3. **The ceiling was low anyway.** After stage 1 a closing run is ≈ 250 ms of
+   pre-scans, ≈ 650 ms of walk and 0.5–2.5 s of post-walk scans and re-inference.
+   A perfect targeted walk saves the 650 ms, ≈ 2 s over the three closing runs,
+   not the 5–7 s estimated above: that estimate assumed the whole run becomes
+   targeted, and the scans are module-wide.
+
+So stage 2 depends on stage 3 and 4, not the other way round: the scan-derived
+facts have to become persisted inputs of the walk (per-function facts, recomputed
+only where an input changed) before a walk can be skipped, and the facts have to
+be monotone (only ever added in the direction of the lattice) before they can be
+carried from run to run. Then a closing run is targeted in both walk and scans,
+and the 2 × ≈ 2 s of runs 11 and 13 plus most of run 7 go.
+
 ## Staged plan
 
 0. **Measure** (this doc): `MANTICORE_NARROW_MOVED`, the `call-graph sccs:` stats
