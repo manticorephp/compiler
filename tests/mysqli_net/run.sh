@@ -9,6 +9,7 @@
 # The exit status is part of the behaviour: php's and the binary's must agree.
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
+VERSION_SED="$ROOT/tests/mysqli_net/version.sed"
 FILTER=""
 SERVER=mysql
 SHARD_I=0; SHARD_N=1
@@ -51,9 +52,8 @@ for f in tests/mysqli_net/cases/*.php; do
     fi
     act=$("$WORK/$n" 2>&1 | head -c 1000000); nrc=${PIPESTATUS[0]}
     rm -f "$WORK/$n" "$WORK/$n.log"
-    # the oracle php floats with the CI image; its patch release must not fail a case
-    exp=$(sed -E 's/mysqlnd [0-9]+\.[0-9]+\.[0-9]+/mysqlnd X.Y.Z/g; s/(client_version"?\]? *(=>|=) *)(int\()?[0-9]{5}/\1\3NNNNN/g' <<<"$exp")
-    act=$(sed -E 's/mysqlnd [0-9]+\.[0-9]+\.[0-9]+/mysqlnd X.Y.Z/g; s/(client_version"?\]? *(=>|=) *)(int\()?[0-9]{5}/\1\3NNNNN/g' <<<"$act")
+    exp=$(sed -E -f "$VERSION_SED" <<<"$exp")
+    act=$(sed -E -f "$VERSION_SED" <<<"$act")
     if [ "$nrc" != "$prc" ]; then echo "FAIL $n (native exit status $nrc, php $prc)"; fail=$((fail+1)); continue; fi
     # a case that printed its own assertion failure fails even when php printed the same
     if grep -q 'ASSERTION FAILED' <<<"$exp$act"; then echo "FAIL $n (the case reports a failed assertion)"; fail=$((fail+1)); continue; fi
